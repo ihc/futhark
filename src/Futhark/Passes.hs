@@ -4,7 +4,9 @@
 module Futhark.Passes
   ( standardPipeline
   , sequentialPipeline
+  , sequentialPipelineWithMemoryBlockMerging
   , gpuPipeline
+  , gpuPipelineWithMemoryBlockMerging
 
   , CompilationMode (..)
   )
@@ -23,6 +25,7 @@ import Futhark.Optimise.InliningDeadFun
 import Futhark.Optimise.TileLoops
 import Futhark.Optimise.DoubleBuffer
 import Futhark.Optimise.Unstream
+import Futhark.Pass.MemoryBlockMerging
 import Futhark.Pass.ExpandAllocations
 import Futhark.Pass.ExplicitAllocations
 import Futhark.Pass.ExtractKernels
@@ -92,6 +95,13 @@ sequentialPipeline mode =
          , simplifyExplicitMemory
          ]
 
+sequentialPipelineWithMemoryBlockMerging :: CompilationMode -> Pipeline SOACS ExplicitMemory
+sequentialPipelineWithMemoryBlockMerging mode =
+  sequentialPipeline mode >>>
+  passes [ mergeMemoryBlocks
+         , simplifyExplicitMemory
+         ]
+
 gpuPipeline :: CompilationMode -> Pipeline SOACS ExplicitMemory
 gpuPipeline mode =
   standardPipeline mode >>>
@@ -113,5 +123,14 @@ gpuPipeline mode =
          , doubleBuffer
          , simplifyExplicitMemory
          , expandAllocations
+         , simplifyExplicitMemory
+         , mergeMemoryBlocks
+         , simplifyExplicitMemory
+         ]
+
+gpuPipelineWithMemoryBlockMerging :: CompilationMode -> Pipeline SOACS ExplicitMemory
+gpuPipelineWithMemoryBlockMerging mode =
+  gpuPipeline mode >>>
+  passes [ mergeMemoryBlocks
          , simplifyExplicitMemory
          ]

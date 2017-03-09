@@ -44,6 +44,7 @@ import Futhark.Optimise.Unstream
 import Futhark.Pass.KernelBabysitting
 import Futhark.Pass.ExtractKernels
 import Futhark.Pass.ExpandAllocations
+import Futhark.Pass.MemoryBlockMerging
 import Futhark.Pass.ExplicitAllocations
 import Futhark.Passes
 
@@ -274,9 +275,6 @@ commandLineOptions =
   , Option "p" ["print"]
     (NoArg $ Right $ \opts -> opts { futharkAction = PolyAction printAction printAction printAction })
     "Prettyprint the resulting internal representation on standard output (default action)."
-  , Option [] ["memory-playground"]
-    (NoArg $ Right $ \opts -> opts { futharkAction = ExplicitMemoryAction memoryAction })
-    "Memory block playground."
   , typedPassOption soacsProg Kernels firstOrderTransform "f"
   , soacsPassOption fuseSOACs "o"
   , soacsPassOption inlineAggressively []
@@ -291,6 +289,7 @@ commandLineOptions =
 
   , explicitMemoryPassOption doubleBuffer []
   , explicitMemoryPassOption expandAllocations []
+  , explicitMemoryPassOption mergeMemoryBlocks []
 
   , cseOption []
   , simplifyOption "e"
@@ -299,8 +298,12 @@ commandLineOptions =
     (standardPipeline Library) "s" ["standard"]
   , explicitMemoryPipelineOption "Run the full GPU compilation pipeline"
     (gpuPipeline Library) [] ["gpu"]
+  , explicitMemoryPipelineOption "Run the full GPU compilation pipeline with memory block merging"
+    (gpuPipelineWithMemoryBlockMerging Library) [] ["gpu-mem"]
   , explicitMemoryPipelineOption "Run the sequential CPU compilation pipeline"
     (sequentialPipeline Library) [] ["cpu"]
+  , explicitMemoryPipelineOption "Run the sequential CPU compilation pipeline with memory block merging"
+    (sequentialPipelineWithMemoryBlockMerging Library) [] ["cpu-mem"]
   ]
 
 -- | Entry point.  Non-interactive, except when reading interpreter
