@@ -4,6 +4,8 @@ module Futhark.Pass.MemoryBlockMerging
        ( mergeMemoryBlocks )
        where
 
+import System.IO.Unsafe (unsafePerformIO) -- Just for debugging!
+
 import Control.Applicative
 import Control.Monad.Except
 import Control.Monad.State
@@ -40,10 +42,19 @@ transformBody (Body () bnds res) = do
 
 transformStm :: Stm ExplicitMemory -> MergeM [Stm ExplicitMemory]
 transformStm (Let pat () e) = do
-  (bnds, e') <- transformExp =<< mapExpM transform e
+  (bnds, e') <- transformExp pat =<< mapExpM transform e
   return $ bnds ++ [Let pat () e']
   where transform = identityMapper { mapOnBody = const transformBody
                                    }
-transformExp :: Exp ExplicitMemory -> MergeM ([Stm ExplicitMemory], Exp ExplicitMemory)
-transformExp e =
+
+transformExp :: Pattern ExplicitMemory -> Exp ExplicitMemory -> MergeM ([Stm ExplicitMemory], Exp ExplicitMemory)
+transformExp pat (Op (Alloc se sp)) = do
+  let a = unsafePerformIO $ do
+        print pat
+        print se
+        print sp
+        putStrLn "-----"
+  let sp' = sp
+  a `seq` return ([], Op (Alloc se sp'))
+transformExp _ e =
   return ([], e)
