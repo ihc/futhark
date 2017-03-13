@@ -133,6 +133,10 @@ Library
                    Futhark.Pass
                    Futhark.Passes
                    Futhark.Pass.MemoryBlockMerging
+                   Futhark.Pass.MemoryBlockMerging.Miscellaneous
+                   Futhark.Pass.MemoryBlockMerging.DataStructs
+                   Futhark.Pass.MemoryBlockMerging.LastUse
+                   Futhark.Pass.MemoryBlockMerging.ArrayCoalescing
                    Futhark.Pass.ExpandAllocations
                    Futhark.Pass.ExplicitAllocations
                    Futhark.Pass.ExtractKernels
