@@ -9,6 +9,7 @@ import Data.List
 
 import Prelude
 
+import Futhark.Error
 import Futhark.Representation.AST.Attributes.Constants
 import Futhark.Representation.ExplicitMemory (Prog, ExplicitMemory)
 import Futhark.CodeGen.Backends.PyOpenCL.Boilerplate
@@ -23,7 +24,8 @@ import Futhark.MonadFreshNames
 
 
 --maybe pass the config file rather than multiple arguments
-compileProg :: MonadFreshNames m => Maybe String -> Prog ExplicitMemory ->  m (Either String String)
+compileProg :: MonadFreshNames m =>
+               Maybe String -> Prog ExplicitMemory ->  m (Either InternalError String)
 compileProg module_name prog = do
   res <- ImpGen.compileProg prog
   --could probably be a better why do to this..
@@ -39,8 +41,9 @@ compileProg module_name prog = do
              Assign (Var "preferred_platform") None,
              Assign (Var "preferred_device") None,
              Assign (Var "fut_opencl_src") $ RawStringLiteral $ opencl_prelude ++ opencl_code,
-             Escape pyTestMain,
-             Escape pyFunctions]
+             Escape pyReader,
+             Escape pyFunctions,
+             Escape pyPanic]
       let imports = [Import "sys" Nothing,
                      Import "numpy" $ Just "np",
                      Import "ctypes" $ Just "ct",

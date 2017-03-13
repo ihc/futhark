@@ -60,8 +60,12 @@ builtinFtable = HM.fromList $ mapMaybe addBuiltin $ HM.toList E.intrinsics
            FunBinding
            (baseName name,
             [], [], [], map (I.Prim . internalisePrimType) paramts,
+            params,
             const $ Just $ ExtRetType [I.Prim $ internalisePrimType t])
            (E.Prim t, map E.Prim paramts))
+          where params =
+                  [Param (ID (nameFromString "x", i)) (I.Prim $ internalisePrimType pt)
+                  | (i,pt) <- zip [0..] paramts]
         addBuiltin _ =
           Nothing
 
@@ -89,6 +93,7 @@ preprocessValDecs = noteFunctions . HM.fromList <=< mapM funFrom
                                                 [],
                                                 shapenames,
                                                 map declTypeOf $ concat values,
+                                                consts++shapes++concat values,
                                                 applyRetType
                                                 (ExtRetType rettype')
                                                 (consts++shapes++concat values)
@@ -309,14 +314,14 @@ internaliseExp desc (E.TupLit es _) =
   concat <$> mapM (internaliseExp desc) es
 
 internaliseExp desc (E.RecordLit orig_fields _) =
-  concatMap snd . sortFields . HM.toList . HM.unions . reverse <$> mapM internaliseField orig_fields
+  concatMap snd . sortFields . HM.unions . reverse <$> mapM internaliseField orig_fields
   where internaliseField (E.RecordField name e _) = do
           e' <- internaliseExp desc e
           return $ HM.singleton name e'
         internaliseField (E.RecordRecord e) = do
           (field_names, field_types) <-
             case E.typeOf e of
-              Record fs -> return $ unzip $ sortFields $ HM.toList fs
+              Record fs -> return $ unzip $ sortFields fs
               _         -> fail $ "Type of " ++ pretty e ++ " is not record."
           e' <- internaliseExp desc e
           lens <- mapM internalisedTypeSize field_types
@@ -379,21 +384,22 @@ internaliseExp desc (E.Apply fname args _ _)
 internaliseExp desc (E.Apply qfname args _ loc) = do
   fname <- lookupSubst qfname
   args' <- concat <$> mapM (internaliseExp "arg" . fst) args
-  (fname', constparams, closure, shapes, value_paramts, rettype_fun) <- internalFun <$> lookupFunction fname
-  (constargs, const_ds, const_ts) <- unzip3 <$> constFunctionArgs constparams
-  closure_ts <- mapM (fmap (`toDecl` Nonunique) . lookupType) closure
+  (fname', constparams, closure, shapes, value_paramts, fun_params, rettype_fun) <-
+    internalFun <$> lookupFunction fname
+  (constargs, const_ds, _) <- unzip3 <$> constFunctionArgs constparams
   argts <- mapM subExpType args'
   let shapeargs = argShapes shapes value_paramts argts
       diets = const_ds ++ replicate (length closure + length shapeargs) I.Observe ++
               map I.diet value_paramts
-      paramts = const_ts ++ closure_ts ++ map (const $ I.Prim int32) shapeargs ++ value_paramts
-  args'' <- ensureArgShapes asserting loc shapes paramts $
-            constargs ++ map I.Var closure ++ shapeargs ++ args'
+      paramts = map (const $ I.Prim int32) shapeargs ++ value_paramts
+  args'' <- ((constargs++map I.Var closure)++) <$>
+            ensureArgShapes asserting loc shapes paramts (shapeargs ++ args')
   argts' <- mapM subExpType args''
   case rettype_fun $ zip args'' argts' of
     Nothing -> fail $ "Cannot apply " ++ pretty fname ++ " to arguments\n " ++
                pretty args'' ++ "\nof types\n " ++
-               pretty argts'
+               pretty argts' ++
+               "\nFunction has parameters\n " ++ pretty fun_params
     Just rettype -> letTupExp' desc $ I.Apply fname' (zip args'' diets) rettype
 
 internaliseExp desc (E.LetPat pat e body _) = do
@@ -416,7 +422,8 @@ internaliseExp desc (E.LetFun ofname (params, _, Info rettype, e) body loc) = do
         constparams = map (mkConstParam . snd) cm
         shapenames = map I.paramName shapeparams
         normal_params = shapenames ++ map paramName (concat params')
-        free_in_fun = freeInBody e'' `HS.difference` HS.fromList normal_params
+        normal_param_names = HS.fromList normal_params
+        free_in_fun = freeInBody e'' `HS.difference` normal_param_names
 
     used_free_params <- forM (HS.toList free_in_fun) $ \v -> do
       v_t <- lookupType v
@@ -434,6 +441,7 @@ internaliseExp desc (E.LetFun ofname (params, _, Info rettype, e) body loc) = do
                       map I.paramName free_params,
                       shapenames,
                       map declTypeOf $ concat params',
+                      all_params,
                       applyRetType (ExtRetType rettype') all_params)
                  , externalFun = (rettype, map E.patternStructType params)
                  }
@@ -853,8 +861,7 @@ internaliseExp desc (E.Project k e (Info rt) _) = do
   n <- internalisedTypeSize rt
   i' <- fmap sum $ mapM internalisedTypeSize $
         case E.typeOf e of
-               Record fs -> map snd $ filter ((<k) . fst) $
-                            sortFields $ HM.toList fs
+               Record fs -> map snd $ filter ((<k) . fst) $ sortFields fs
                t         -> [t]
   take n . drop i' <$> internaliseExp desc e
 
@@ -1201,18 +1208,16 @@ internaliseCurrying :: QualName VName
                     -> [E.Exp]
                     -> SrcLoc
                     -> [I.Type]
-                    -> InternaliseM
-                    ([I.LParam], I.Body, [I.ExtType])
+                    -> InternaliseM ([I.LParam], I.Body, [I.ExtType])
 internaliseCurrying qfname curargs loc row_ts = do
   fname <- lookupSubst qfname
-  (fname', constparams, closure, shapes, value_param_ts, int_rettype_fun) <-
+  (fname', constparams, closure, shapes, value_param_ts, fun_params, int_rettype_fun) <-
     internalFun <$> lookupFunction fname
 
-  closure_ts <- mapM (fmap (`toDecl` Nonunique) . lookupType) closure
   curargs' <- concat <$> mapM (internaliseExp "curried") curargs
   curarg_ts <- mapM subExpType curargs'
   params <- mapM (newParam "not_curried") row_ts
-  (constargs, const_ds, const_ts) <- unzip3 <$> constFunctionArgs constparams
+  (constargs, const_ds, _) <- unzip3 <$> constFunctionArgs constparams
 
   let closureargs = map I.Var closure
       valargs = curargs' ++ map (I.Var . I.paramName) params
@@ -1222,17 +1227,18 @@ internaliseCurrying qfname curargs loc row_ts = do
               replicate (length closure) I.Observe ++
               replicate (length shapeargs) I.Observe ++
               map I.diet value_param_ts
-      param_ts = const_ts ++ closure_ts ++ map (const $ I.Prim int32) shapeargs ++ value_param_ts
+      param_ts = map (const $ I.Prim int32) shapeargs ++ value_param_ts
 
   ((res, ts), fun_bnds) <- localScope (scopeOfLParams params) $ collectStms $ do
-    allargs <- ensureArgShapes asserting loc shapes param_ts $
-               constargs ++ closureargs ++ shapeargs ++ valargs
+    allargs <- ((constargs ++ closureargs)++) <$>
+               ensureArgShapes asserting loc shapes param_ts (shapeargs ++ valargs)
     argts' <- mapM subExpType allargs
     case int_rettype_fun $ zip allargs argts' of
       Nothing ->
         fail $ "Cannot apply " ++ pretty fname ++ " to arguments\n " ++
         pretty (constargs ++ closureargs ++ shapeargs ++ valargs) ++ "\nof types\n " ++
-        pretty param_ts
+        pretty argts' ++
+        "\nFunction has parameters\n " ++ pretty fun_params
       Just (ExtRetType ts) -> do
         res <- letTupExp "curried_fun_result" $
                I.Apply fname' (zip allargs diets) $ ExtRetType ts
@@ -1448,7 +1454,7 @@ lookupConstant :: VName -> InternaliseM (Maybe [SubExp])
 lookupConstant name = do
   is_const <- fmap internalFun <$> lookupFunction' name
   case is_const of
-    Just (fname, constparams, _, _, _, mk_rettype) -> do
+    Just (fname, constparams, _, _, _, _, mk_rettype) -> do
       (constargs, const_ds, const_ts) <- unzip3 <$> constFunctionArgs constparams
       case mk_rettype $ zip constargs $ map I.fromDecl const_ts of
         Nothing -> fail $ "lookupConstant: " ++ pretty name ++ " failed"
