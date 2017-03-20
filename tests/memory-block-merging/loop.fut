@@ -1,4 +1,4 @@
--- Memory block merging in a loop.
+-- Memory block merging in a basic loop.
 -- ==
 -- input { [0, 3, 5, 7, 9, 11] }
 -- output { [0i32, 384i32, 640i32, 896i32, 1152i32, 1408i32, 14i32, 18i32, 22i32] }

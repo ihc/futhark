@@ -4,22 +4,16 @@ module Futhark.Pass.MemoryBlockMerging.Miscellaneous where
 
 import Prelude
 import Data.Maybe
-import Control.Arrow
 import qualified Data.HashMap.Lazy as HM
-import qualified Data.HashSet      as HS
+import qualified Data.HashSet as HS
 
 import Debug.Trace
 
---import Futhark.Representation.AST.Syntax
-
-import Futhark.Representation.Aliases -- default AbSyn
+import Futhark.Representation.Aliases
 import qualified Futhark.Representation.ExplicitMemory as ExpMem
---import qualified Futhark.Representation.Aliases    as RepAls  -- In
-import qualified Futhark.Analysis.Alias            as AnlAls  -- Als
+import qualified Futhark.Analysis.Alias as AnlAls
 
 import Futhark.Pass.MemoryBlockMerging.DataStructs
-import Futhark.Pass.MemoryBlockMerging.LastUse
-import Futhark.Pass.MemoryBlockMerging.ArrayCoalescing
 
 
 -----------------------------------
@@ -146,33 +140,6 @@ defInterference lutab env pat =
 
   in env { alias = alias', v2mem = v2mem', intrf = intrf', active = active' }
 
---             (Let pat _ (If _ then_body else_body _)) =
-{--
-intrfAnBnd lutab env (Let pat _ e) =
-  let stab  = alias env
-      stab' = foldl (\stabb patel->
-                        -- compute the transitive closure of current pattern
-                        -- name by concating all its aliases entries in stabb
-                        let (al0,l1) = patElemAttr patel
-                            al = case l1 of
-                                   ExpMem.Scalar tp ->
-                                     trace ("MemLore: "++(pretty (patElemName patel))++" is Scalar: "++pretty tp++" ("++pretty l1++") ") al0
-                                   ExpMem.MemMem se sp ->
-                                     trace ("MemLore: "++(pretty (patElemName patel))++" is MemMem: "++pretty se++" , "++pretty sp++" ("++pretty l1++") ") al0
-                                   ExpMem.ArrayMem tp shp u nm indfun ->
-                                     trace ("MemLore: "++(pretty (patElemName patel))++" is ArrayMem: "++pretty tp++" , "++pretty shp++" , "++pretty u++" , "++pretty nm++" , "++pretty indfun++" ("++pretty l1++") ") al0
-                            al_nms = unNames al
-                            al_trns= HS.foldl' (\acc x -> case HM.lookup x stabb of
-                                                            Nothing -> acc
-                                                            Just aal -> HS.union acc aal
-                                               ) al_nms al_nms
---al_trns' = trace ("AL Pattern: "++(pretty (patElemName patel))++" aliases: "++pretty (HS.toList al_trns)) al_trns
-                        in  if null al_trns then stabb
-                        else HM.insert (patElemName patel) al_trns stabb
-                    ) stab $ patternValueElements pat -- patternContextElements pat
-  in  env { alias = stab' }
---}
-
 
 updateInterference :: AliasTab -> AllocTab -> Names -> IntrfTab -> [VName] -> IntrfTab
 updateInterference alias0 alloc0 active0 =
@@ -193,61 +160,3 @@ getLastUseMem v2mem0 =
                   Nothing -> acc
                   Just (MemBlock _ _ m _)  -> HS.insert m acc
             ) HS.empty
-
-----------------------------------------------------------------
---- Printer/Tester Main Program
-----------------------------------------------------------------
-
-{--
-
-lastUseAnPrg :: ExpMem.Prog ExpMem.ExplicitMemory -> LUTabPrg
-lastUseAnPrg prg = let aliased_prg = AnlAls.aliasAnalysis prg
-                   in  HM.fromList $ map lastUseAnFun $ progFunctions aliased_prg
-
---}
-
-memoryBlockMerging :: ExpMem.Prog ExpMem.ExplicitMemory -> IO ()
-memoryBlockMerging prg = do
-  mapM_ lookAtFunction (progFunctions prg)
-
-  let lutab   = lastUsePrg $ AnlAls.aliasAnalysis prg
-      envtab  = intrfAnPrg lutab prg
-
-  putStrLn "LAST_USE RESULT:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList) (HM.elems lutab))
-
-  putStrLn "ALLOCATIONS RESULT:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (HS.toList . alloc) (HM.elems envtab))
---  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concat $ map (\env -> HM.toList $ alloc env) $ HM.elems envtab)
-
-  putStrLn "ALIAS RESULT:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList . alias) (HM.elems envtab))
-
-  putStrLn "INTERFERENCE RESULT:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList . intrf) (HM.elems envtab))
-
-  let coaltab = mkCoalsTab $ AnlAls.aliasAnalysis prg
-  putStrLn $ "COALESCING RESULT:" ++ pretty (length coaltab)
-  let coal_info = map (\env ->
-                            ( dstmem env, dstind env, HS.toList $ alsmem env, HM.toList $ optdeps env
-                            , map (\ (k,Coalesced _ (MemBlock _ _ b indfun) sbst) ->
-                                    (k,(b,indfun,HM.toList sbst))
-                                  ) $ HM.toList $ vartab env
-                            )
-                      ) $ HM.elems coaltab
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
-
-
-lookAtFunction :: ExpMem.FunDef ExpMem.ExplicitMemory -> IO ()
-lookAtFunction (ExpMem.FunDef _ fname _ params body) = do
-  let ExpMem.Body () bnds res = body
-  putStrLn $ "In Function: " ++ pretty fname ++ " with params " ++ pretty params
-  mapM_ lookAtBinding bnds
-  putStrLn $ "Result: " ++ pretty res
-  where lookAtBinding (ExpMem.Let pat () e) = do
-          putStrLn $ "The binding with pattern: " ++ pretty pat
-          putStrLn $ "And corresponding expression:\n" ++
-                     unlines (map ("  "++) $ lines $ pretty e)
-
-
---futhark --gpu --memory-playground ../futhark-benchmarks/accelerate/canny/canny.fut

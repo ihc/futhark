@@ -124,8 +124,6 @@ gpuPipeline mode =
          , simplifyExplicitMemory
          , expandAllocations
          , simplifyExplicitMemory
-         , mergeMemoryBlocks
-         , simplifyExplicitMemory
          ]
 
 gpuPipelineWithMemoryBlockMerging :: CompilationMode -> Pipeline SOACS ExplicitMemory
