@@ -18,7 +18,7 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.State
 import Control.Monad.Except
-import qualified Data.HashMap.Lazy as HM
+import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.List
 import System.FilePath
@@ -83,11 +83,14 @@ reportingIOErrors = flip catches [Handler onExit, Handler onError]
   where onExit :: ExitCode -> IO ()
         onExit = throwIO
         onError :: SomeException -> IO ()
-        onError e = do
-          T.hPutStrLn stderr "Internal compiler error (unhandled IO exception)."
-          T.hPutStrLn stderr "Please report this at https://github.com/HIPERFIT/futhark/issues."
-          T.hPutStrLn stderr $ T.pack $ show e
-          exitWith $ ExitFailure 1
+        onError e
+          | Just UserInterrupt <- asyncExceptionFromException e =
+              return () -- This corresponds to CTRL-C, which is not an error.
+          | otherwise = do
+              T.hPutStrLn stderr "Internal compiler error (unhandled IO exception)."
+              T.hPutStrLn stderr "Please report this at https://github.com/HIPERFIT/futhark/issues."
+              T.hPutStrLn stderr $ T.pack $ show e
+              exitWith $ ExitFailure 1
 
 runCompilerOnProgram :: FutharkConfig
                      -> Pipeline I.SOACS lore
@@ -148,7 +151,7 @@ readImport search_path steps name
       throwError $ ExternalError $ T.pack $
       "Import cycle: " ++ intercalate " -> " (reverse $ name:steps)
   | otherwise = do
-      already_done <- gets $ HM.member name . alreadyImported
+      already_done <- gets $ M.member name . alreadyImported
 
       unless already_done $ do
         (file_contents, file_name) <- readImportFile search_path name
@@ -168,7 +171,7 @@ readImport search_path steps name
             externalError $ T.pack $ show err
           Right ((progmod, prog'), ws, src') ->
             modify $ \s ->
-              s { alreadyImported = HM.insert name progmod imports
+              s { alreadyImported = M.insert name progmod imports
                 , nameSource      = src'
                 , warnings        = warnings s <> ws
                 , resultProgs     = prog' : resultProgs s
@@ -223,7 +226,7 @@ readProgram fp = do
 
 newNameSourceForCompiler :: VNameSource
 newNameSourceForCompiler = newNameSource $ succ $ maximum $ map baseTag $
-                           HM.keys E.intrinsics
+                           M.keys E.intrinsics
 
 typeCheckInternalProgram :: I.Prog -> FutharkM ()
 typeCheckInternalProgram prog =

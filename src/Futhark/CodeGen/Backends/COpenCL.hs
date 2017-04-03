@@ -72,6 +72,16 @@ compileProg prog = do
                            , optionArgument = RequiredArgument
                            , optionAction = [C.cstm|cl_num_groups = atoi(optarg);|]
                            }
+                  , Option { optionLongName = "dump-opencl"
+                           , optionShortName = Nothing
+                           , optionArgument = RequiredArgument
+                           , optionAction = [C.cstm|cl_dump_program_to = optarg;|]
+                           }
+                  , Option { optionLongName = "load-opencl"
+                           , optionShortName = Nothing
+                           , optionArgument = RequiredArgument
+                           , optionAction = [C.cstm|cl_load_program_from = optarg;|]
+                           }
                   ]
 
 writeOpenCLScalar :: GenericC.WriteScalar OpenCL ()

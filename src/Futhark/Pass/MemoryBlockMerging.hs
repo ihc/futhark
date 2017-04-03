@@ -11,8 +11,8 @@ import Control.Monad.Except
 import Control.Monad.State
 import Control.Arrow
 import Data.List
-import qualified Data.HashMap.Lazy as HM
-import qualified Data.HashSet as HS
+import qualified Data.Map.Strict as M
+import qualified Data.Set      as S
 
 
 import Prelude hiding (div, quot)
@@ -45,24 +45,24 @@ transformProg prog = do
       coaltab = mkCoalsTab $ aliasAnalysis prog
       coal_info = map (\env ->
                           (dstmem env, dstind env,
-                           HS.toList $ alsmem env, HM.toList $ optdeps env,
+                           S.toList $ alsmem env, M.toList $ optdeps env,
                            map (\(k, Coalesced _ (MemBlock _ _ b indfun) sbst) ->
-                                   (k,(b,indfun,HM.toList sbst)))
-                            $ HM.toList $ vartab env)
-                      ) $ HM.elems coaltab
+                                   (k,(b,indfun,M.toList sbst)))
+                            $ M.toList $ vartab env)
+                      ) $ M.elems coaltab
 
   let debug = unsafePerformIO $ do
         putStrLn "Last use result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList) (HM.elems lutab))
+        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
 
         putStrLn "Allocations result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (HS.toList . alloc) (HM.elems envtab))
+        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . alloc) (M.elems envtab))
 
         putStrLn "Alias result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList . alias) (HM.elems envtab))
+        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . alias) (M.elems envtab))
 
         putStrLn "Interference result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second HS.toList) . HM.toList . intrf) (HM.elems envtab))
+        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . intrf) (M.elems envtab))
 
         putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
         putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)

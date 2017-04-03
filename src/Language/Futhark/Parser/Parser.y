@@ -1,5 +1,6 @@
 {
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE TupleSections #-}
 -- | Futhark parser written with Happy.
 module Language.Futhark.Parser.Parser
   ( prog
@@ -36,7 +37,7 @@ import qualified Data.Text.IO as T
 import Data.Char (ord)
 import Data.Maybe (fromMaybe)
 import Data.Loc hiding (L) -- Lexer has replacements.
-import qualified Data.HashMap.Lazy as HM
+import qualified Data.Map.Strict as M
 import Data.Monoid
 
 import Language.Futhark.Syntax hiding (ID)
@@ -136,7 +137,6 @@ import Language.Futhark.Parser.Lexer
       '_'             { L $$ UNDERSCORE }
       '@'             { L $$ AT }
       '\\'            { L $$ BACKSLASH }
-      fun             { L $$ FUN }
       entry           { L $$ ENTRY }
       '->'            { L $$ RIGHT_ARROW }
       '<-'            { L $$ LEFT_ARROW }
@@ -154,7 +154,6 @@ import Language.Futhark.Parser.Lexer
       rearrange       { L $$ REARRANGE }
       transpose       { L $$ TRANSPOSE }
       rotate          { L $$ ROTATE }
-      zipWith         { L $$ ZIPWITH }
       zip             { L $$ ZIP }
       unzip           { L $$ UNZIP }
       unsafe          { L $$ UNSAFE }
@@ -168,14 +167,14 @@ import Language.Futhark.Parser.Lexer
       empty           { L $$ EMPTY }
       copy            { L $$ COPY }
       while           { L $$ WHILE }
-      streamMap       { L $$ STREAM_MAP }
-      streamMapPer    { L $$ STREAM_MAPPER }
-      streamRed       { L $$ STREAM_RED }
-      streamRedPer    { L $$ STREAM_REDPER }
-      streamSeq       { L $$ STREAM_SEQ }
+      stream_map      { L $$ STREAM_MAP }
+      stream_map_per  { L $$ STREAM_MAPPER }
+      stream_red      { L $$ STREAM_RED }
+      stream_red_per  { L $$ STREAM_REDPER }
+      stream_seq      { L $$ STREAM_SEQ }
       include         { L $$ INCLUDE }
       import          { L $$ IMPORT }
-      write           { L $$ WRITE }
+      scatter         { L $$ SCATTER }
       type            { L $$ TYPE }
       module          { L $$ MODULE }
       val             { L $$ VAL }
@@ -202,7 +201,7 @@ nonassoc with
 %nonassoc '['
 %nonassoc Id
 %left juxtprec
-%left indexprec iota shape copy transpose rotate rearrange split shape reduce map scan filter partition zipWith streamRed streamRedPer streamMap streamMapPer streamSeq
+%left indexprec iota shape copy transpose rotate rearrange split shape reduce map scan filter partition stream_red stream_red_per stream_map stream_map_per streamSeq
 %%
 
 -- Some parameterized productions.  Left-recursive, as this is faster
@@ -234,12 +233,11 @@ Prog :: { UncheckedProg }
 
 
 Dec :: { [UncheckedDec] }
-    : Fun               { [ValDec $ FunDec $1] }
-    | Const             { [ValDec $ ConstDec $1] }
+    : Fun               { [FunDec $1] }
+    | Val               { [ValDec $1] }
     | TypeAbbr          { map TypeDec $1 }
     | SigBind           { [SigDec $1 ] }
-    | StructBind        { [StructDec $1 ] }
-    | FunctorBind       { [FunctorDec $1] }
+    | ModBind           { [ModDec $1 ] }
     | DefaultDec        { [] }
     | import stringlit
       { let L loc (STRINGLIT s) = $2 in [OpenDec (ModImport s loc) [] $1] }
@@ -277,9 +275,8 @@ ModExp :: { UncheckedModExp }
         : import stringlit { let L _ (STRINGLIT s) = $2 in ModImport s $1 }
         | ModExp ':' SigExp
           { ModAscript $1 $3 NoInfo (srclocOf $1) }
-        | '\\' '(' id ':' SigExp ')' maybeAscription(SimpleSigExp) '->' ModExp
-          { let L _ (ID pname) = $3
-            in ModLambda (pname, $5) $7 $9 $1 }
+        | '\\' ModParam maybeAscription(SimpleSigExp) '->' ModExp
+          { ModLambda $2 $3 $5 $1 }
         | ModExpApply
           { $1 }
         | ModExpAtom
@@ -302,18 +299,14 @@ SimpleSigExp :: { UncheckedSigExp }
              : QualName            { let (v, loc) = $1 in SigVar v loc }
              | '(' SigExp ')'      { $2 }
 
-StructBind :: { StructBindBase NoInfo Name }
-           : module id maybeAscription(SigExp) '=' ModExp
-             { let L pos (ID name) = $2
-               in StructBind name (case $3 of {Just mty -> ModAscript $5 mty NoInfo pos;
-                                               Nothing -> $5}) pos
-             }
+ModBind :: { ModBindBase NoInfo Name }
+         : module id many(ModParam) maybeAscription(SigExp) '=' ModExp
+           { let L floc (ID fname) = $2;
+             in ModBind fname $3 (fmap (,NoInfo) $4) $6 $1
+           }
 
-FunctorBind :: { FunctorBindBase NoInfo Name }
-             : module id '(' id ':' SigExp ')' maybeAscription(SigExp) '=' ModExp
-               { let L floc (ID fname) = $2; L ploc (ID pname) = $4
-                 in FunctorBind fname (pname, $6) $8 $10 $1
-               }
+ModParam :: { ModParamBase NoInfo Name }
+          : '(' id ':' SigExp ')' { let L _ (ID name) = $2 in ModParam name $4 $1 }
 
 Spec :: { SpecBase NoInfo Name }
       : val id ':' SigTypeDecl
@@ -379,7 +372,7 @@ BindingBinOp :: { Name }
                    return name }
       | '-'   { nameFromString "-" }
 
-Fun     : fun id many1(Param) maybeAscription(TypeExpDecl) '=' Exp
+Fun     : let id many1(Param) maybeAscription(TypeExpDecl) '=' Exp
           { let L pos (ID name) = $2
             in FunBind (name==defaultEntryPoint) name (fmap declaredType $4) NoInfo
                (fst $3 : snd $3) $6 pos
@@ -389,17 +382,17 @@ Fun     : fun id many1(Param) maybeAscription(TypeExpDecl) '=' Exp
           { let L pos (ID name) = $2
             in FunBind True name (fmap declaredType $4) NoInfo (fst $3 : snd $3) $6 pos }
 
-        | fun Param BindingBinOp Param maybeAscription(TypeExpDecl) '=' Exp
+        | let Param BindingBinOp Param maybeAscription(TypeExpDecl) '=' Exp
           { FunBind False $3 (fmap declaredType $5) NoInfo [$2,$4] $7 $1
           }
 ;
 
-Const : val id ':' TypeExpDecl '=' Exp
-        { let L loc (ID name) = $2
-          in ConstBind name (Just $ declaredType $4) NoInfo $6 loc }
-      | val id '=' Exp
-        { let L loc (ID name) = $2
-          in ConstBind name Nothing NoInfo $4 loc }
+Val : let id ':' TypeExpDecl '=' Exp
+      { let L loc (ID name) = $2
+        in ValBind name (Just $ declaredType $4) NoInfo $6 loc }
+    | let id '=' Exp
+      { let L loc (ID name) = $2
+        in ValBind name Nothing NoInfo $4 loc }
 
 SigTypeDecl :: { ([TypeDeclBase NoInfo Name], TypeDeclBase NoInfo Name) }
              : TypeExpDecl
@@ -508,9 +501,6 @@ Exp2 :: { UncheckedExp }
      | map FunAbstr many1(Atom)
                       { Map $2 (fst $3:snd $3) $1 }
 
-     | zipWith FunAbstr many1(Atom)
-                      { Map $2 (fst $3:snd $3) $1 }
-
      | scan FunAbstr Atom Atom
                       { Scan $2 $3 $4 $1 }
 
@@ -532,18 +522,18 @@ Exp2 :: { UncheckedExp }
 
      | copy Atom   { Copy $2 $1 }
 
-     | streamMap       FunAbstr Atom
+     | stream_map       FunAbstr Atom
                          { Stream (MapLike InOrder)  $2 $3 $1 }
-     | streamMapPer    FunAbstr Atom
+     | stream_map_per    FunAbstr Atom
                          { Stream (MapLike Disorder) $2 $3 $1 }
-     | streamRed       FunAbstr FunAbstr Atom
+     | stream_red       FunAbstr FunAbstr Atom
                          { Stream (RedLike InOrder Noncommutative $2) $3 $4 $1 }
-     | streamRedPer    FunAbstr FunAbstr Atom
+     | stream_red_per    FunAbstr FunAbstr Atom
                          { Stream (RedLike Disorder Commutative $2) $3 $4 $1 }
-     | streamSeq       FunAbstr Atom Atom
+     | stream_seq       FunAbstr Atom Atom
                          { Stream (Sequential $3) $2 $4 $1 }
-     | write Atom Atom Atom
-                         { Write $2 $3 $4 $1 }
+     | scatter Atom Atom Atom
+                         { Scatter $2 $3 $4 $1 }
 
      | Exp2 '+...' Exp2    { binOp $1 $2 $3 }
      | Exp2 '-...' Exp2    { binOp $1 $2 $3 }
@@ -913,7 +903,7 @@ putTokens :: [L Token] -> ParserMonad ()
 putTokens ts = lift $ lift $ put ts
 
 primTypeFromName :: Name -> ParserMonad PrimType
-primTypeFromName s = maybe boom return $ HM.lookup s namesToPrimTypes
+primTypeFromName s = maybe boom return $ M.lookup s namesToPrimTypes
   where boom = fail $ "No type named " ++ nameToString s
 
 defaultType :: Name -> ParserMonad ()

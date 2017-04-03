@@ -18,7 +18,7 @@ import Data.Foldable (forM_)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import qualified Data.HashMap.Lazy as HM
+import qualified Data.Map.Strict as M
 import System.Console.GetOpt
 import System.Directory
 import System.Process.Text (readProcessWithExitCode)
@@ -97,9 +97,9 @@ optimisedProgramMetrics (KernelsPipeline pipeline) program = do
 testMetrics :: FilePath -> StructureTest -> TestM ()
 testMetrics program (StructureTest pipeline expected) = context "Checking metrics" $ do
   actual <- optimisedProgramMetrics pipeline program
-  mapM_ (ok actual) $ HM.toList expected
+  mapM_ (ok actual) $ M.toList expected
   where ok metrics (name, expected_occurences) =
-          case HM.lookup name metrics of
+          case M.lookup name metrics of
             Nothing
               | expected_occurences > 0 ->
               throwError $ name <> " should have occurred " <> T.pack (show expected_occurences) <>
@@ -112,7 +112,8 @@ testMetrics program (StructureTest pipeline expected) = context "Checking metric
 
 runTestCase :: TestCase -> TestM ()
 runTestCase (TestCase mode program testcase progs extra_options) = do
-  forM_ (testExpectedStructure testcase) $ testMetrics program
+  unless (mode == TypeCheck) $
+    forM_ (testExpectedStructure testcase) $ testMetrics program
 
   case testAction testcase of
 
@@ -127,7 +128,7 @@ runTestCase (TestCase mode program testcase progs extra_options) = do
          ExitFailure 1 -> throwError err
          ExitFailure _ -> checkError expected_error err
 
-    RunCases _ | mode == OnlyTypeCheck -> do
+    RunCases _ | mode == TypeCheck -> do
       let typeChecker = configTypeChecker progs
       context ("Type-checking with " <> T.pack typeChecker) $ do
         (code, _, err) <-
@@ -140,18 +141,18 @@ runTestCase (TestCase mode program testcase progs extra_options) = do
     RunCases ios -> do
       -- Compile up-front and reuse same executable for several entry points.
       let compiler = configCompiler progs
-      unless (mode == OnlyInterpret) $
+      unless (mode == Interpreted) $
         context ("Compiling with " <> T.pack compiler) $
         compileTestProgram compiler program
-
-      mapM_ runInputOutputs ios
+      unless (mode == Compile) $
+        mapM_ runInputOutputs ios
 
   where
     runInputOutputs (InputOutputs entry run_cases) =
       forM_ run_cases $ \run -> context ("Entry point: " <> entry <> "; dataset: " <>
                                          T.pack (runDescription run)) $ do
         let interpreter = configInterpreter progs
-        unless (mode == OnlyCompile || runMode run == CompiledOnly) $
+        unless (mode == Compiled || runMode run == CompiledOnly) $
           context ("Interpreting with " <> T.pack interpreter) $
             interpretTestProgram interpreter program entry run
 
@@ -398,23 +399,27 @@ setTypeChecker :: FilePath -> ProgConfig -> ProgConfig
 setTypeChecker typeChecker config =
   config { configTypeChecker = typeChecker }
 
-data TestMode = OnlyTypeCheck
-              | OnlyCompile
-              | OnlyInterpret
+data TestMode = TypeCheck
+              | Compile
+              | Compiled
+              | Interpreted
               | Everything
               deriving (Eq, Show)
 
 commandLineOptions :: [FunOptDescr TestConfig]
 commandLineOptions = [
-    Option "t" ["only-typecheck"]
-    (NoArg $ Right $ \config -> config { configTestMode = OnlyTypeCheck })
+    Option "t" ["typecheck"]
+    (NoArg $ Right $ \config -> config { configTestMode = TypeCheck })
     "Only perform type-checking"
-  , Option "i" ["only-interpret"]
-    (NoArg $ Right $ \config -> config { configTestMode = OnlyInterpret })
+  , Option "i" ["interpreted"]
+    (NoArg $ Right $ \config -> config { configTestMode = Interpreted })
     "Only interpret"
-  , Option "c" ["only-compile"]
-    (NoArg $ Right $ \config -> config { configTestMode = OnlyCompile })
+  , Option "c" ["compiled"]
+    (NoArg $ Right $ \config -> config { configTestMode = Compiled })
     "Only run compiled code"
+  , Option "C" ["compile"]
+    (NoArg $ Right $ \config -> config { configTestMode = Compile })
+    "Only compile, do not run."
   , Option [] ["nobuffer"]
     (NoArg $ Right $ \config -> config { configUnbufferOutput = True })
     "Do not buffer output, and write each result on a line by itself."

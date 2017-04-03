@@ -37,7 +37,7 @@ module Futhark.Representation.AST.Attributes
 
 import Data.List
 import Data.Maybe (mapMaybe, isJust)
-import qualified Data.HashMap.Lazy as HM
+import qualified Data.Map.Strict as M
 
 import Futhark.Representation.AST.Attributes.Reshape
 import Futhark.Representation.AST.Attributes.Rearrange
@@ -57,11 +57,11 @@ import Futhark.Util.Pretty (Pretty)
 
 -- | @isBuiltInFunction k@ is 'True' if @k@ is an element of 'builtInFunctions'.
 isBuiltInFunction :: Name -> Bool
-isBuiltInFunction fnm = fnm `HM.member` builtInFunctions
+isBuiltInFunction fnm = fnm `M.member` builtInFunctions
 
 -- | A map of all built-in functions and their types.
-builtInFunctions :: HM.HashMap Name (PrimType,[PrimType])
-builtInFunctions = HM.fromList $ map namify
+builtInFunctions :: M.Map Name (PrimType,[PrimType])
+builtInFunctions = M.fromList $ map namify
                    [("sqrt32", (FloatType Float32, [FloatType Float32]))
                    ,("log32", (FloatType Float32, [FloatType Float32]))
                    ,("exp32", (FloatType Float32, [FloatType Float32]))
@@ -185,9 +185,12 @@ class (Eq op, Ord op, Show op,
        Pretty op) => IsOp op where
   -- | Like 'safeExp', but for arbitrary ops.
   safeOp :: op -> Bool
+  -- | Should we try to hoist this out of branches?
+  cheapOp :: op -> Bool
 
 instance IsOp () where
   safeOp () = True
+  cheapOp () = True
 
 -- | Lore-specific attributes; also means the lore supports some basic
 -- facilities.
@@ -196,9 +199,9 @@ class (Annotations lore,
        PrettyLore lore,
 
        Renameable lore, Substitutable lore,
-       FreeIn (ExpAttr lore),
+       FreeAttr (ExpAttr lore),
        FreeIn (LetAttr lore),
-       FreeIn (BodyAttr lore),
+       FreeAttr (BodyAttr lore),
        FreeIn (FParamAttr lore),
        FreeIn (LParamAttr lore),
        FreeIn (RetType lore),

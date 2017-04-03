@@ -6,7 +6,6 @@
   #include <CL/cl.h>
 #endif
 
-#define FUT_KERNEL(s) #s
 #define OPENCL_SUCCEED(e) opencl_succeed(e, #e, __FILE__, __LINE__)
 
 static cl_context fut_cl_context;
@@ -20,6 +19,8 @@ static size_t cl_group_size = 256;
 static size_t cl_num_groups = 128;
 static size_t cl_tile_size = 32;
 static size_t cl_lockstep_width = 1;
+static const char* cl_dump_program_to = NULL;
+static const char* cl_load_program_from = NULL;
 
 struct opencl_device_option {
   cl_platform_id platform;
@@ -351,21 +352,44 @@ static cl_program setup_opencl(const char *prelude_src, const char *src) {
   fut_cl_queue = clCreateCommandQueue(fut_cl_context, device, 0, &error);
   assert(error == 0);
 
-  /* Make sure this function is defined. */
+  // Make sure this function is defined.
   post_opencl_setup(&device_option);
 
-  // Build the OpenCL program.  First we have to prepend the prelude to the program source.
-  size_t prelude_size = strlen(prelude_src);
-  size_t program_size = strlen(src);
-  size_t src_size = prelude_size + program_size;
-  char *fut_opencl_src = malloc(src_size + 1);
-  strncpy(fut_opencl_src, prelude_src, src_size);
-  strncpy(fut_opencl_src+prelude_size, src, src_size-prelude_size);
-  fut_opencl_src[src_size] = '0';
+  char *fut_opencl_src = NULL;
+  size_t src_size = 0;
+
+  // Maybe we have to read OpenCL source from somewhere else (used for debugging).
+  if (cl_load_program_from) {
+    FILE *f = fopen(cl_load_program_from, "r");
+    assert(f != NULL);
+    fseek(f, 0, SEEK_END);
+    src_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    fut_opencl_src = malloc(src_size);
+    fread(fut_opencl_src, 1, src_size, f);
+    fclose(f);
+  } else {
+    // Build the OpenCL program.  First we have to prepend the prelude to the program source.
+    size_t prelude_size = strlen(prelude_src);
+    size_t program_size = strlen(src);
+    src_size = prelude_size + program_size;
+    fut_opencl_src = malloc(src_size + 1);
+    strncpy(fut_opencl_src, prelude_src, src_size);
+    strncpy(fut_opencl_src+prelude_size, src, src_size-prelude_size);
+    fut_opencl_src[src_size] = 0;
+  }
 
   cl_program prog;
   error = 0;
   const char* src_ptr[] = {fut_opencl_src};
+
+  if (cl_dump_program_to) {
+    FILE *f = fopen(cl_dump_program_to, "w");
+    assert(f != NULL);
+    fputs(fut_opencl_src, f);
+    fclose(f);
+  }
+
   prog = clCreateProgramWithSource(fut_cl_context, 1, src_ptr, &src_size, &error);
   assert(error == 0);
   char compile_opts[1024];

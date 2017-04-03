@@ -33,7 +33,8 @@ import Language.Futhark.Syntax (BinOp(..))
 @hexlit = 0[xX][0-9a-fA-F]+
 @declit = [0-9]+
 @binlit = 0[bB][01]+
-@intlit = @hexlit|@binlit|@declit
+@romlit = 0[rR][IVXLCM]+
+@intlit = @hexlit|@binlit|@declit|@romlit
 @reallit = (([0-9]+("."[0-9]*)?))([eE][\+\-]?[0-9]+)?
 
 @field = [a-zA-Z0-9] [a-zA-Z0-9_]*
@@ -110,7 +111,8 @@ keyword s =
     "loop"         -> LOOP
     "in"           -> IN
     "default"      -> DEFAULT
-    "fun"          -> FUN
+    "fun"          -> LET -- retained for backwards compatibility; remove soon
+    "val"          -> VAL
     "for"          -> FOR
     "do"           -> DO
     "with"         -> WITH
@@ -124,9 +126,8 @@ keyword s =
     "rotate"       -> ROTATE
     "map"          -> MAP
     "reduce"       -> REDUCE
-    "reduceComm"   -> REDUCECOMM
+    "reduce_comm"  -> REDUCECOMM
     "zip"          -> ZIP
-    "zipWith"      -> ZIPWITH
     "unzip"        -> UNZIP
     "unsafe"       -> UNSAFE
     "scan"         -> SCAN
@@ -137,18 +138,17 @@ keyword s =
     "empty"        -> EMPTY
     "copy"         -> COPY
     "while"        -> WHILE
-    "streamMap"    -> STREAM_MAP
-    "streamMapPer" -> STREAM_MAPPER
-    "streamRed"    -> STREAM_RED
-    "streamRedPer" -> STREAM_REDPER
-    "streamSeq"    -> STREAM_SEQ
-    "write"        -> WRITE
+    "stream_map"     -> STREAM_MAP
+    "stream_map_per" -> STREAM_MAPPER
+    "stream_red"     -> STREAM_RED
+    "stream_red_per" -> STREAM_REDPER
+    "stream_seq"     -> STREAM_SEQ
+    "scatter"      -> SCATTER
     "include"      -> INCLUDE
     "import"       -> IMPORT
     "type"         -> TYPE
     "entry"        -> ENTRY
     "module"       -> MODULE
-    "val"          -> VAL
     "open"         -> OPEN
     _              -> ID $ nameFromText s
 
@@ -178,6 +178,8 @@ readIntegral s
       T.foldl (another hex_digits) 0 (T.drop 2 s)
   | "0b" `T.isPrefixOf` s || "0b" `T.isPrefixOf` s =
       T.foldl (another binary_digits) 0 (T.drop 2 s)
+  | "0r" `T.isPrefixOf` s =
+       fromRoman (T.drop 2 s)
   | otherwise =
       T.foldl (another decimal_digits) 0 s
       where another digits acc c = acc * base + maybe 0 fromIntegral (elemIndex (toLower c) digits)
@@ -210,6 +212,30 @@ symbol [] q
   | nameToText q == ">=" = GEQ
   | otherwise = SYMBOL (leadingOperator q) [] q
 symbol qs q = SYMBOL (leadingOperator q) qs q
+
+
+romanNumerals :: Integral a => [(T.Text,a)]
+romanNumerals = reverse
+                [ ("I",     1)
+                , ("IV",    4)
+                , ("V",     5)
+                , ("IX",    9)
+                , ("X",    10)
+                , ("XL",   40)
+                , ("L",    50)
+                , ("XC",   90)
+                , ("C",   100)
+                , ("CD",  400)
+                , ("D",   500)
+                , ("CM",  900)
+                , ("M",  1000)
+                ]
+
+fromRoman :: Integral a => T.Text -> a
+fromRoman s =
+  case find ((`T.isPrefixOf` s) . fst) romanNumerals of
+    Nothing -> 0
+    Just (d,n) -> n+fromRoman (T.drop (T.length d) s)
 
 alexEOF = return ((0,0,0), (0,0,0), EOF)
 
@@ -294,7 +320,6 @@ data Token = ID Name
            | REARRANGE
            | TRANSPOSE
            | ROTATE
-           | ZIPWITH
            | ZIP
            | UNZIP
            | UNSAFE
@@ -313,7 +338,7 @@ data Token = ID Name
            | STREAM_RED
            | STREAM_REDPER
            | STREAM_SEQ
-           | WRITE
+           | SCATTER
            | INCLUDE
            | IMPORT
            | ENTRY
