@@ -1,6 +1,6 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 -- | Playground for work on merging memory blocks
-module Futhark.Pass.MemoryBlockMerging.LastUse
+module Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse
   ( lastUseFun
   , lastUsePrg
   ) where
@@ -15,7 +15,7 @@ import qualified Data.Set      as S
 
 import Futhark.Representation.Aliases
 import qualified Futhark.Representation.ExplicitMemory as ExpMem
-import Futhark.Pass.MemoryBlockMerging.DataStructs
+import Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs
 
 -- | Last-Use analysis of a Futhark program in aliased explicit-memory lore form.
 --   Takes as input such a program and produces a `M.Map VName [VName]`,

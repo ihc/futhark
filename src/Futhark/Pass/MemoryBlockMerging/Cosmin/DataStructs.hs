@@ -1,5 +1,5 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
-module Futhark.Pass.MemoryBlockMerging.DataStructs
+module Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs
        ( Coalesced(..),CoalescedKind(..), ArrayMemBound(..), AllocTab
        , V2MemTab, AliasTab, LUTabFun, LUTabPrg, ScalarTab,  CoalsTab
        , CoalsEntry(..), FreeVarSubsts

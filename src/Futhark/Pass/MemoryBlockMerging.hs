@@ -26,10 +26,10 @@ import Futhark.Representation.ExplicitMemory
                BasicOp, Exp, Lambda, ExtLambda, FunDef, FParam, LParam, RetType)
 import Futhark.Analysis.Alias (aliasAnalysis)
 
-import Futhark.Pass.MemoryBlockMerging.DataStructs
-import Futhark.Pass.MemoryBlockMerging.LastUse
-import Futhark.Pass.MemoryBlockMerging.ArrayCoalescing
-import Futhark.Pass.MemoryBlockMerging.Miscellaneous
+import Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs
+import Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse
+import Futhark.Pass.MemoryBlockMerging.Cosmin.ArrayCoalescing
+import Futhark.Pass.MemoryBlockMerging.Cosmin.Miscellaneous
 
 
 mergeMemoryBlocks :: Pass ExplicitMemory ExplicitMemory
@@ -38,8 +38,8 @@ mergeMemoryBlocks = simplePass
                     "Transform program to reuse non-interfering memory blocks"
                     transformProg
 
-transformProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Prog ExplicitMemory)
-transformProg prog = do
+cosminCode :: Prog ExplicitMemory -> IO ()
+cosminCode prog = do
   let lutab = lastUsePrg $ aliasAnalysis prog
       envtab = intrfAnPrg lutab prog
       coaltab = mkCoalsTab $ aliasAnalysis prog
@@ -51,21 +51,26 @@ transformProg prog = do
                             $ M.toList $ vartab env)
                       ) $ M.elems coaltab
 
+  putStrLn "Last use result:"
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
+
+  putStrLn "Allocations result:"
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . alloc) (M.elems envtab))
+
+  putStrLn "Alias result:"
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . alias) (M.elems envtab))
+
+  putStrLn "Interference result:"
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . intrf) (M.elems envtab))
+
+  putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
+
+transformProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Prog ExplicitMemory)
+transformProg prog = do
+
   let debug = unsafePerformIO $ do
-        putStrLn "Last use result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
-
-        putStrLn "Allocations result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . alloc) (M.elems envtab))
-
-        putStrLn "Alias result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . alias) (M.elems envtab))
-
-        putStrLn "Interference result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . intrf) (M.elems envtab))
-
-        putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
+        cosminCode prog
 
   debug `seq` intraproceduralTransformation transformFunDef prog
 
