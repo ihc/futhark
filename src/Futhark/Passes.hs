@@ -7,7 +7,7 @@ module Futhark.Passes
   , sequentialPipelineWithMemoryBlockMerging
   , gpuPipeline
   , gpuPipelineWithMemoryBlockMerging
-
+  , defaultToMemoryBlockMerging
   , CompilationMode (..)
   )
 where
@@ -131,3 +131,9 @@ gpuPipelineWithMemoryBlockMerging mode =
   passes [ mergeMemoryBlocks
          , simplifyExplicitMemory
          ]
+
+-- | Flag to determine whether futhark-c and futhark-opencl should default to
+-- doing memory block merging.  Useful when using futhark-test and
+-- futhark-bench.
+defaultToMemoryBlockMerging :: Bool
+defaultToMemoryBlockMerging = False
