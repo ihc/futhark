@@ -1,4 +1,5 @@
--- Memory block merging with a copy.
+-- Memory block merging with a copy.  Requires allocation hoisting of the memory
+-- block for 't1'.
 
 let main (ns: []i32): []i32 =
   let t0 = map (+ 1) ns

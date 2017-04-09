@@ -100,6 +100,10 @@ markSuccessCoal (actv,succc) m_b info_b =
   ( M.delete m_b actv
   , appendCoalsInfo m_b info_b succc )
 
+prettyInhibitTab :: InhibitTab -> String
+prettyInhibitTab tab =
+  let list_tups = map (second S.toList) (M.toList tab)
+  in  pretty list_tups
 
 --------------------------------------------------------------------------------
 --- Main Coalescing Transformation computes a successful coalescing table    ---
@@ -134,7 +138,7 @@ mkCoalsTabFun fun@(FunDef _ _ _ fpars body) =
               new_inhibited = M.unionWith S.union inhb_tab (inhibited topenv0)
           in  if not (M.null actv_tab1)
               then trace ("COALESCING ROOT: BROKEN INV, active not empty: " ++ pretty (M.keys actv_tab1) ) M.empty
-              else if   trace ("COALESCING ROOT, new inhibitions : "++pretty (map (Control.Arrow.second S.toList) $ M.toList inhb_tab)) $
+              else if   trace ("COALESCING ROOT, new inhibitions : "++prettyInhibitTab inhb_tab) $
                         M.null inhb_tab
                    then succ_tab
                    else fixPointCoalesce lutab fpars0 body0 (topenv0{ inhibited = new_inhibited })
@@ -213,7 +217,26 @@ mkCoalsTabBnd _ (Let (Pattern [] [pe]) _ e) td_env bu_env
   | Just primexp <- primExpFromExp (basePMconv (scope td_env) (scals bu_env)) e =
   bu_env { scals = M.insert (patElemName pe) primexp (scals bu_env) }
 
--- | STILL BUGGY (the rule for IF)
+-- | Assume the if-result is a candidate for coalescing (further in the code).
+--   For now we conservatively treat only the case when both then and else
+--   result arrays are created inside their corresponding branches of the @if@.
+--   Otherwise we need more complex analysis, and may open pandora box.
+--   For example, the code below:
+--        @let a = map f a0                @
+--        @let (c,x) = if cond             @
+--        @            then (a,x)          @
+--        @            else let b = map g a@
+--        @                 let x[1] = a   @
+--        @                 in (b,x)       @
+--        @let y[3] = c                    @
+--  If coalescing of the if-result succeeds than both @a@ and @b@ are placed
+--  to @m_y[3]@. First, this is buggy because @b = map g a@ on the else branch.
+--  Second this is buggy because @a@ will be associated to @m_y[3]@ on the then
+--  branch, and with @m_x[1]@ on the else branch. Currently, unifying two
+--  mappings with different memory destinations, just picks one of them.
+--  If @m_x[1]@ is picked than we have an inconsisstent state. All these
+--  because we allow such cases, which is unclear whether appear and can
+--  be optimized in practice.
 mkCoalsTabBnd lutab (Let patt _ (If _ body_then body_else _)) td_env bu_env =
   let pat_val_elms  = patternValueElements patt
       not_ip_pat = all notInPlace pat_val_elms
@@ -226,12 +249,22 @@ mkCoalsTabBnd lutab (Let patt _ (If _ body_then body_else _)) td_env bu_env =
   -- ii) extend @activeCoals@ by transfering the pattern-elements bindings existent
   --     in @activeCoals@ to the body results of the then and else branches, but only
   --     if the current pattern element can be potentially coalesced and also
-  --     if the current pattern element satisfies safety conditions 2 & 5
+  --     if the current pattern element satisfies safety conditions 2 & 5.
       res_mem_then = findMemBodyResult activeCoals0 (scope td_env) pat_val_elms body_then
       res_mem_else = findMemBodyResult activeCoals0 (scope td_env) pat_val_elms body_else
 
-      actv_then = foldl transferCoalsToBody activeCoals0 res_mem_then
-      actv_else = foldl transferCoalsToBody activeCoals0 res_mem_else
+      actv_then_i = foldl transferCoalsToBody activeCoals0 res_mem_then
+      actv_else_i = foldl transferCoalsToBody activeCoals0 res_mem_else
+
+      -- eliminate the original pattern binding of the if statement,
+      -- @let x = if y[0,0] > 0 then map (+y[0,0) a else map (+1) b@
+      -- @let y[0] = x@
+      -- should succeed because @m_y@ is used before @x@ is created.
+      (actv_then, actv_else) = foldl (\(acth,acel) (m_b,_,_,m_r) ->
+                                            if m_b == m_r
+                                            then (acth, acel)
+                                            else (M.delete m_b acth, M.delete m_b acel)
+                                     ) (actv_then_i, actv_else_i) res_mem_then
 
   --iii) process the then and else bodies
       res_then = mkCoalsTabBdy lutab body_then td_env (bu_env {activeCoals = actv_then})
@@ -244,39 +277,51 @@ mkCoalsTabBnd lutab (Let patt _ (If _ body_then body_else _)) td_env bu_env =
         foldl (\ ((act,inhb),succc) ((m_b,b,r1,mr1),(_,_,r2,mr2)) ->
                 case M.lookup m_b act of
                   Nothing   -> Exc.assert False ((act,inhb),succc) -- impossible
-                  Just info -> -- Optimistically promote and append!
-                    let has_no_chance_then =
-                          case (M.lookup mr1 actv_then0, M.lookup mr1 succ_then0) of
-                            (Nothing,Nothing) -> True
-                            _                 -> False
-                        has_no_chance_else =
-                          case (M.lookup mr2 actv_else0, M.lookup mr2 succ_else0) of
-                            (Nothing,Nothing) -> True
-                            _                 -> False
-                    in  if has_no_chance_then || has_no_chance_else
-                        -- either then-result or else-result already failed coalescing,
-                        -- hence the if-result already failed coalescing; remove it.
-                        -- we can additionally do some filtering of the then/else tables,
-                        -- but I feel lazy so we will carry them around.
-                        then trace ("COALESCING: optimistic if-then-else fails "++pretty has_no_chance_then++" "++pretty has_no_chance_else)
-                                   (markFailedCoal (act,inhb) m_b, succc)
-                        else let info' = info { optdeps = M.insert r2 mr2 $
-                                                M.insert r1 mr1 $ optdeps info }
-                                 (act',succc') = markSuccessCoal (act,succc) m_b info'
-                             in  trace ("COALESCING: optimistic if-then-else promotion: "++pretty b++pretty m_b)
-                                       ((act',inhb), succc')
+                  Just info ->
+                    case (M.lookup mr1 succ_then0, M.lookup mr2 succ_else0) of
+                      (Just _, Just _) -> -- Optimistically promote and append!
+                        let info' = info { optdeps = M.insert r2 mr2 $
+                                           M.insert r1 mr1 $ optdeps info }
+                            (act',succc') = markSuccessCoal (act,succc) m_b info'
+                        in trace ("COALESCING: if-then-else promotion: "++pretty b++pretty m_b)
+                                 ((act',inhb), succc')
+                      _ -> if m_b == mr1 && m_b == mr2
+                           then -- special case resembling:
+                                -- @let x0 = map (+1) a                                  @
+                                -- @let x3 = if cond then let x1 = x0 with [0] <- 2 in x1@
+                                -- @                 else let x2 = x0 with [1] <- 3 in x2@
+                                -- @let z[1] = y                                         @
+                                -- In this case the result active table should be the union
+                                -- of the @m_x@ entries of the then and else active tables.
+                                case (M.lookup mr1 actv_then0, M.lookup mr2 actv_else0) of
+                                  (Just info_then, Just info_else) -> -- add it to active
+                                    let info' = unionCoalsEntry info $
+                                                unionCoalsEntry info_then info_else
+                                        act'  = M.insert m_b info' act
+                                    in  ((act',inhb),succc)
+                                  -- otherwise remove the coalescing result
+                                  _ -> trace ("COALESCING: if-then-else fails m_b == mr1 == mr2 "++pretty b++" "++pretty m_b)
+                                             (markFailedCoal (act,inhb) m_b, succc)
+                           else -- one of the branches has failed coalescing, hence remove
+                                -- the coalescing of the result.
+                                trace ("COALESCING: if-then-else fails "++pretty b++pretty m_b)
+                                      (markFailedCoal (act,inhb) m_b, succc)
               ) ((activeCoals0, inhibit0), successCoals0) (zip res_mem_then res_mem_else)
 
   --  v) unify coalescing results of all branches by taking the union
-  --     of all entries in the current/then/else active and success tables.
-      actv_com  = M.intersectionWith unionCoalsEntry actv_then0 $
+  --     of all entries in the current/then/else success tables.
+      actv_com_then = M.intersectionWith unionCoalsEntry actv_then0 activeCoals0
+      then_diff_com = M.difference actv_then0 actv_com_then
+      (_,inhb_then1)= --trace ("DIFF COM: "++prettyCoalTab then_diff_com ++ " INHIBIT: "++prettyInhibitTab inhb_then0) $
+                      foldl markFailedCoal (then_diff_com,inhb_then0) (M.keys then_diff_com)
+
+      actv_com_else = M.intersectionWith unionCoalsEntry actv_else0 activeCoals0
+      else_diff_com = M.difference actv_else0 actv_com_else
+      (_,inhb_else1)= foldl markFailedCoal (else_diff_com,inhb_else0) (M.keys else_diff_com)
+
+      actv_res0 = M.intersectionWith unionCoalsEntry actv_then0 $
                   M.intersectionWith unionCoalsEntry actv_else0 activeCoals1
-      then_diff_com = M.difference actv_then0 activeCoals0 --actv_com
-      else_diff_com = M.difference actv_else0 activeCoals0 --actv_com
-      actv_res0 = M.unionWith unionCoalsEntry then_diff_com $
-                  M.unionWith unionCoalsEntry else_diff_com actv_com
-                  -- M.unionWith unionCoalsEntry activeCoals1 $
-                  -- M.unionWith unionCoalsEntry actv_then0 actv_else0
+
       succ_res  = M.unionWith unionCoalsEntry succ_then0 $
                   M.unionWith unionCoalsEntry succ_else0 successCoals1
 
@@ -293,8 +338,10 @@ mkCoalsTabBnd lutab (Let patt _ (If _ body_then body_else _)) td_env bu_env =
         trace ("COALESCING IF: active == "++prettyCoalTab actv_res0) $
         mkCoalsHelper1FilterActive patt body_free_vars (scope td_env)
                                    (scals bu_env) actv_res0 inhibit1
-      inhibit_res = M.unionWith S.union inhibit_res0 $
-                    M.unionWith S.union inhb_then0 inhb_else0
+
+      inhibit_res = --trace ("COALESCING IF inhibits: " ++ prettyInhibitTab inhibit_res0 ++ " " ++ prettyInhibitTab inhb_then1 ++ " " ++ prettyInhibitTab inhb_else1) $
+                    M.unionWith S.union inhibit_res0 $
+                    M.unionWith S.union inhb_then1 inhb_else1
   in  bu_env { activeCoals = actv_res, successCoals = succ_res, inhibit = inhibit_res }
 
 --mkCoalsTabBnd lutab (Let pat _ (Op (ExpMem.Inner (ExpMem.Kernel str cs ker_space tps ker_bdy)))) td_env bu_env =
@@ -304,7 +351,7 @@ mkCoalsTabBnd lutab (Let pat _ (DoLoop arginis_ctx arginis lform body)) td_env b
   let pat_val_elms  = patternValueElements pat
       not_ip_pat = all notInPlace pat_val_elms
 
-  --  i) Filter @activeCoals@ by the 2ND, 3rd AND 5th safety conditions:
+  --  i) Filter @activeCoals@ by the 2nd, 3rd AND 5th safety conditions:
       (activeCoals00,inhibit00) =
         filterSafetyCond2and5 (activeCoals bu_env) (inhibit bu_env) (scals bu_env)
                               (alloc td_env) (scope td_env) pat_val_elms
@@ -323,12 +370,12 @@ mkCoalsTabBnd lutab (Let pat _ (DoLoop arginis_ctx arginis lform body)) td_env b
                   scopeOfLoopForm lform))
   -- ii) Extend @activeCoals@ by transfering the pattern-elements bindings existent
   --     in @activeCoals@ to the loop-body results, but only if:
-  --        a) the pattern element is a candidate for coalescing,     and
-  --        b) the pattern element satisfies safety conditions 2 & 5,
-  --           (conditions 1 and 2 have already been checked above),  and
-  --        c) the memory block of the corresponding body result is
+  --       (a) the pattern element is a candidate for coalescing,     and
+  --       (b) the pattern element satisfies safety conditions 2 & 5,
+  --           (conditions (a) and (b) have already been checked above), and
+  --       (c) the memory block of the corresponding body result is
   --           allocated outside the loop, i.e., non-existential,     and
-  --        d) the init name is lastly-used in the initialization
+  --       (d) the init name is lastly-used in the initialization
   --           of the loop variant.
   --     Otherwise fail and remove from active-coalescing table!
       scopetab_loop = scopetab <> scopeOf (bodyStms body)
@@ -365,21 +412,39 @@ mkCoalsTabBnd lutab (Let pat _ (DoLoop arginis_ctx arginis lform body)) td_env b
                 ) (zip3 pat_val_elms arginis bdy_ress)
 
       -- remove the other pattern elements from the active coalescing table:
-      coal_pat_mems = S.fromList $ map fst patmems
+      coal_pat_names = S.fromList $ map fst patmems
       (actv1,inhibit1) =
         foldl (\(act,inhb) (b, MemBlock _ _ m_b _, _) ->
-                 if   S.member b coal_pat_mems then (act,inhb) -- ok
+                 if   S.member b coal_pat_names then (act,inhb) -- ok
                  else markFailedCoal (act,inhb) m_b -- remove from active
               ) (actv0,inhibit0) (getArrMemAssoc pat)
 
-  -- iii) process the loop's body
+  -- iii) Process the loop's body.
+  --      If the memory blocks of the loop result and loop variant param differ
+  --      then make the original memory block of the loop result conflict with
+  --      the original memory block of the loop parameter. This is done in
+  --      order to prevent the coalescing of @a1@, @a0@, @x@ and @db@ in the
+  --      same memory block of @y@ in the example below:
+  --      @loop(a1 = a0) = for i < n do @
+  --      @    let x = map (+1) a1      @
+  --      @    let db = copy x          @
+  --      @    in db                    @
+  --      @let y[0] = a1                @
+  --      Meaning the coalescing of @x@ in @let db = copy x@ should fail because
+  --      @a1@ appears in the definition of @let x = map (+1) a1@.
       res_mem_bdy = zipWith (\(b,m_b) (r,m_r) -> (m_b,b,r,m_r)) patmems resmems
       res_mem_arg = zipWith (\(b,m_b) (r,m_r) -> (m_b,b,r,m_r)) patmems argmems
       res_mem_ini = zipWith (\(b,m_b) (r,m_r) -> (m_b,b,r,m_r)) patmems inimems
       actv2 = foldl transferCoalsToBody actv1 (res_mem_bdy++res_mem_arg++res_mem_ini)
+      actv3 = foldl (\ tab ((_,_,_,m_r),(_,_,_,m_a)) ->
+                        if m_r == m_a then tab
+                        else case M.lookup m_r tab of
+                                Nothing   -> tab
+                                Just etry -> M.insert m_r (etry { alsmem = S.insert m_a (alsmem etry) }) tab
+                    ) actv2 (zip res_mem_bdy res_mem_arg)
 
       res_env_body = mkCoalsTabBdy lutab body (td_env { scope    = scopetab })
-                                              (bu_env { activeCoals = actv2
+                                              (bu_env { activeCoals = actv3
                                                       , inhibit = inhibit1  })
 
   -- iv) optimistically mark the pattern succesful if there is any chance to succeed
@@ -438,7 +503,7 @@ mkCoalsTabBnd lutab (Let pat _ e) td_env bu_env =
                           -- we are at the definition of some variable aliased with
                           -- the coalesced variable @b@, hence extend @activeCoals@,
                           -- e.g., @let a = map f arr  @
-                          --       @let b = transpose a@ <- current statement
+                          --       @let b = reshape a  @ <- current statement
                           --       @ ... use of b ...  @
                           --       @let x[i] = a       @
                           --       we need to add variable @b@ to the entry of @m_a@

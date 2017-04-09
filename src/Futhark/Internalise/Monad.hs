@@ -31,6 +31,9 @@ module Futhark.Internalise.Monad
   , generatingFunctor
   , withDecSubstitutions
 
+  , asserting
+  , assertingOne
+
     -- * Convenient reexports
   , module Futhark.Tools
   )
@@ -246,11 +249,13 @@ noteDecSubsts :: M.Map VName VName -> InternaliseM ()
 noteDecSubsts substs = do
   cur_substs <- allSubsts
   -- Some substitutions of these names may already exist.
-  let substs' = M.map (forward cur_substs) substs
+  let also_substs = M.fromList $ mapMaybe (keyHasExisting cur_substs) $ M.toList substs
   modify $ \s ->
-    s { stateDecSubsts = substs' `M.union` stateDecSubsts s
+    s { stateDecSubsts = also_substs `M.union` substs `M.union` stateDecSubsts s
       }
-  where forward old_substs v = fromMaybe v $ M.lookup v old_substs
+  where keyHasExisting cur_substs (k,v) = do
+          v' <- M.lookup k cur_substs
+          keyHasExisting cur_substs (v,v') `mplus` return (v,v')
 
 generatingFunctor :: M.Map VName VName
                   -> M.Map VName VName
@@ -263,24 +268,37 @@ generatingFunctor p_substs b_substs m = do
   cur_substs <- allSubsts
 
   let frob (k, v)
-        | Just v' <- M.lookup k cur_substs, v' /= v = Just (v', v)
-        | otherwise                                   = Nothing
-  let extra_substs = if in_functor
+        | Just v' <- M.lookup k cur_substs, v' /= v =
+            frob (v', v) `mplus` Just (v', v)
+        | otherwise =
+            Nothing
+
+      extra_substs = if in_functor
                      then M.fromList $ mapMaybe frob $ M.toList b_substs
                      else mempty
       forwards = M.fromList $ mapMaybe frob $ M.toList p_substs
-  let recs = [extra_substs,
+
+      recs = [extra_substs,
               forwards,
               p_substs,
               b_substs]
-      nexts = extra_substs `M.union` b_substs
       update env =
         env { envGeneratingFunctor = True
             , envFunctorSubsts = M.unions recs `M.union`
                                  envFunctorSubsts env
             }
   old_dec_substs <- gets stateDecSubsts
-  local update m <* setDecSubsts (nexts `M.union` old_dec_substs)
+  x <- local update m
+  -- Some of the dec substs may be relevant for the result of the
+  -- functor.  A relevant substitution is one that affects an element
+  -- of b_subst.
+  new_dec_substs <- gets stateDecSubsts
+  let b_elems = M.elems b_substs
+      new_relevant k _ = k `elem` b_elems
+      nexts = M.filterWithKey new_relevant new_dec_substs
+              `M.union` extra_substs `M.union` b_substs
+  setDecSubsts (nexts `M.union` old_dec_substs)
+  return x
 
 withDecSubstitutions :: DecSubstitutions
                      -> InternaliseM a -> InternaliseM a
@@ -288,3 +306,20 @@ withDecSubstitutions p_substs m = do
   let update env =
         env { envFunctorSubsts = p_substs `M.union` envFunctorSubsts env }
   local update m
+
+
+-- | Execute the given action if 'envDoBoundsChecks' is true, otherwise
+-- just return an empty list.
+asserting :: InternaliseM Certificates
+          -> InternaliseM Certificates
+asserting m = do
+  doBoundsChecks <- asks envDoBoundsChecks
+  if doBoundsChecks
+  then m
+  else return []
+
+-- | Execute the given action if 'envDoBoundsChecks' is true, otherwise
+-- just return an empty list.
+assertingOne :: InternaliseM VName
+             -> InternaliseM Certificates
+assertingOne m = asserting $ fmap pure m

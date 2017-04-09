@@ -64,10 +64,10 @@
     "All Futhark keywords.")
 
   (defconst futhark-builtin-functions
-    '("pow" "iota" "shape" "replicate" "reshape" "rotate" "transpose" "map"
-      "reduce" "reduceComm" "zip" "unzip" "zipWith" "scan" "split"
-      "concat" "filter" "partition" "redomap" "empty" "copy" "size"
-      "scatter")
+    '("iota" "shape" "replicate" "reshape" "rearrange" "transpose" "rotate"
+      "split" "concat" "zip" "unzip" "unsafe" "copy" "map" "reduce"
+      "reduce_comm" "scan" "filter" "partition" "scatter" "stream_map"
+      "stream_map_per" "stream_red" "stream_map_per" "stream_seq")
     "All Futhark builtin SOACs, functions, and non-symbolic operators.")
 
   (defconst futhark-builtin-types
@@ -525,6 +525,8 @@ Ignore BEGIN, END, and LENGTH (present to satisfy Emacs)."
   (set (make-local-variable 'indent-region-function) nil)
   (set (make-local-variable 'comment-start) "--")
   (set (make-local-variable 'comment-padding) " ")
+  (set (make-local-variable 'paragraph-separate)
+       (concat comment-start " ==$"))
   (add-hook 'after-change-functions 'futhark-check-unsafe nil))
 
 (provide 'futhark-mode)

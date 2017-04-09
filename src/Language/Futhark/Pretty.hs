@@ -51,8 +51,19 @@ instance Pretty PrimValue where
   ppr (BoolValue False) = text "false"
   ppr (FloatValue v) = ppr v
 
-instance (Eq vn, Hashable vn, Pretty vn) =>
-         Pretty (RecordArrayElemTypeBase (ShapeDecl vn) as) where
+instance (Eq vn, Hashable vn, Pretty vn) => Pretty (DimDecl vn) where
+  ppr AnyDim       = mempty
+  ppr (NamedDim v) = ppr v
+  ppr (BoundDim v) = text "#" <> ppr v
+  ppr (ConstDim n) = ppr n
+
+instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ShapeDecl vn) where
+  ppr (ShapeDecl ds) = mconcat (map (brackets . ppr) ds)
+
+instance Pretty Rank where
+  ppr (Rank n) = mconcat (replicate n (brackets mempty))
+
+instance Pretty shape => Pretty (RecordArrayElemTypeBase shape as) where
   ppr (PrimArrayElem bt _ u) = ppr u <> ppr bt
   ppr (PolyArrayElem bt _ u) = ppr u <> ppr (baseName <$> qualNameFromTypeName bt)
   ppr (ArrayArrayElem at)    = ppr at
@@ -63,55 +74,22 @@ instance (Eq vn, Hashable vn, Pretty vn) =>
         braces $ commasep $ map ppField $ M.toList fs
     where ppField (name, t) = text (nameToString name) <> colon <> ppr t
 
-instance Pretty (RecordArrayElemTypeBase Rank as) where
-  ppr (PrimArrayElem bt _ u) = ppr u <> ppr bt
-  ppr (PolyArrayElem bt _ u) = ppr u <> ppr (baseName <$> qualNameFromTypeName bt)
-  ppr (ArrayArrayElem at)    = ppr at
-  ppr (RecordArrayElem fs)
-    | Just ts <- areTupleFields fs =
-        parens $ commasep $ map ppr ts
-    | otherwise =
-        braces $ commasep $ map ppField $ M.toList fs
-    where ppField (name, t) = text (nameToString name) <> colon <> ppr t
+instance Pretty shape => Pretty (ArrayTypeBase shape as) where
+  ppr (PrimArray et shape u _) =
+    ppr u <> ppr shape <> ppr et
 
-instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ArrayTypeBase (ShapeDecl vn) as) where
-  ppr (PrimArray et (ShapeDecl ds) u _) =
-    ppr u <> mconcat (map (brackets . f) ds) <> ppr et
-    where f AnyDim       = mempty
-          f (NamedDim v) = ppr v
-          f (ConstDim n) = ppr n
+  ppr (PolyArray et shape u _) =
+    ppr u <> ppr shape <> ppr (baseName <$> qualNameFromTypeName et)
 
-  ppr (PolyArray et (ShapeDecl ds) u _) =
-    ppr u <> mconcat (map (brackets . f) ds) <> ppr (baseName <$> qualNameFromTypeName et)
-    where f AnyDim       = mempty
-          f (NamedDim v) = ppr v
-          f (ConstDim n) = ppr n
-
-  ppr (RecordArray fs (ShapeDecl ds) u)
+  ppr (RecordArray fs shape u)
     | Just ts <- areTupleFields fs =
         prefix <> parens (commasep $ map ppr ts)
     | otherwise =
         prefix <> braces (commasep $ map ppField $ M.toList fs)
-    where prefix =       ppr u <> mconcat (map (brackets . f) ds)
-          f AnyDim       = mempty
-          f (NamedDim v) = ppr v
-          f (ConstDim n) = ppr n
+    where prefix = ppr u <> ppr shape
           ppField (name, t) = text (nameToString name) <> colon <> ppr t
 
-instance Pretty (ArrayTypeBase Rank as) where
-  ppr (PrimArray et (Rank n) u _) =
-    ppr u <> mconcat (replicate n (brackets mempty)) <> ppr et
-  ppr (PolyArray et (Rank n) u _) =
-    ppr u <> mconcat (replicate n (brackets mempty)) <> ppr (baseName <$> qualNameFromTypeName et)
-  ppr (RecordArray fs (Rank n) u)
-    | Just ts <- areTupleFields fs =
-        prefix <> parens (commasep $ map ppr ts)
-    | otherwise =
-        prefix <> braces (commasep $ map ppField $ M.toList fs)
-    where prefix = ppr u <> mconcat (replicate n (brackets mempty))
-          ppField (name, t) = text (nameToString name) <> colon <> ppr t
-
-instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeBase (ShapeDecl vn) as) where
+instance Pretty shape => Pretty (TypeBase shape as) where
   ppr (Prim et)    = ppr et
   ppr (TypeVar et) = ppr $ baseName <$> qualNameFromTypeName et
   ppr (Array at)   = ppr at
@@ -120,29 +98,20 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeBase (ShapeDecl vn) as) 
         parens $ commasep $ map ppr ts
     | otherwise =
         braces $ commasep $ map ppField $ M.toList fs
-    where ppField (name, t) = text (nameToString name) <> colon <> ppr t
-
-instance Pretty (TypeBase Rank as) where
-  ppr (Prim et)    = ppr et
-  ppr (TypeVar et) = ppr $ baseName <$> qualNameFromTypeName et
-  ppr (Array at)   = ppr at
-  ppr (Record fs)
-    | Just ts <- areTupleFields fs =
-        parens $ commasep $ map ppr ts
-    | otherwise =
-      braces $ commasep $ map ppField $ M.toList fs
     where ppField (name, t) = text (nameToString name) <> colon <> ppr t
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeExp vn) where
   ppr (TEUnique t _) = text "*" <> ppr t
-  ppr (TEArray at d _) = brackets (f d) <> ppr at
-    where f AnyDim       = mempty
-          f (NamedDim v) = ppr v
-          f (ConstDim n) = ppr n
+  ppr (TEArray at d _) = brackets (ppr d) <> ppr at
   ppr (TETuple ts _) = parens $ commasep $ map ppr ts
   ppr (TERecord fs _) = braces $ commasep $ map ppField fs
     where ppField (name, t) = text (nameToString name) <> colon <> ppr t
   ppr (TEVar name _) = ppr name
+
+instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeArg vn) where
+  ppr (TypeArgVarSize v _) = ppr v
+  ppr (TypeArgBoundSize v _) = ppr v
+  ppr (TypeArgConstSize k _) = ppr k
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeDeclBase f vn) where
   ppr = ppr . declaredType
@@ -349,8 +318,8 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ModExpBase ty vn) where
   ppr (ModLambda param maybe_sig body _) =
     text "\\" <> ppr param <> maybe_sig' <+>
     text "->" </> indent 2 (ppr body)
-    where maybe_sig' = case maybe_sig of Nothing  -> mempty
-                                         Just sig -> colon <+> ppr sig
+    where maybe_sig' = case maybe_sig of Nothing       -> mempty
+                                         Just (sig, _) -> colon <+> ppr sig
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeBindBase ty vn) where
   ppr (TypeBind name usertype _) =
