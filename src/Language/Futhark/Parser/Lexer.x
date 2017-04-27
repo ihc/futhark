@@ -45,7 +45,7 @@ import Language.Futhark.Syntax (BinOp(..))
 @unop = ("!"|"~")
 @qualunop = (@identifier ".")+ @unop
 
-@symbols = ("+"|"-"|"*"|"/"|"%"|"="|"!"|">"|"<"|"|"|"&"|"^")
+@symbols = ("+"|"-"|"*"|"/"|"%"|"="|"!"|">"|"<"|"|"|"&"|"^"|".")
 @binop = @symbols+
 @qualbinop = (@identifier ".")+ @binop
 
@@ -68,6 +68,7 @@ tokens :-
   ":"                      { tokenC COLON }
   "@"                      { tokenC AT }
   "\"                      { tokenC BACKSLASH }
+  "'"                      { tokenC APOSTROPHE }
   "#"                      { tokenC HASH }
 
   @declit                  { tokenM $ return . DECLIT . readIntegral }
@@ -111,7 +112,6 @@ keyword s =
     "loop"         -> LOOP
     "in"           -> IN
     "default"      -> DEFAULT
-    "fun"          -> LET -- retained for backwards compatibility; remove soon
     "val"          -> VAL
     "for"          -> FOR
     "do"           -> DO
@@ -278,6 +278,7 @@ data Token = ID Name
            | COLON
            | AT
            | BACKSLASH
+           | APOSTROPHE
            | HASH
            | LPAR
            | RPAR

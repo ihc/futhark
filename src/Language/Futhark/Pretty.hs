@@ -65,7 +65,8 @@ instance Pretty Rank where
 
 instance Pretty shape => Pretty (RecordArrayElemTypeBase shape as) where
   ppr (PrimArrayElem bt _ u) = ppr u <> ppr bt
-  ppr (PolyArrayElem bt _ u) = ppr u <> ppr (baseName <$> qualNameFromTypeName bt)
+  ppr (PolyArrayElem bt targs _ u) = ppr u <> ppr (baseName <$> qualNameFromTypeName bt) <+>
+                                     spread (map ppr targs)
   ppr (ArrayArrayElem at)    = ppr at
   ppr (RecordArrayElem fs)
     | Just ts <- areTupleFields fs =
@@ -78,8 +79,8 @@ instance Pretty shape => Pretty (ArrayTypeBase shape as) where
   ppr (PrimArray et shape u _) =
     ppr u <> ppr shape <> ppr et
 
-  ppr (PolyArray et shape u _) =
-    ppr u <> ppr shape <> ppr (baseName <$> qualNameFromTypeName et)
+  ppr (PolyArray et targs shape u _) =
+    ppr u <> ppr shape <> ppr (baseName <$> qualNameFromTypeName et) <+> spread (map ppr targs)
 
   ppr (RecordArray fs shape u)
     | Just ts <- areTupleFields fs =
@@ -90,15 +91,19 @@ instance Pretty shape => Pretty (ArrayTypeBase shape as) where
           ppField (name, t) = text (nameToString name) <> colon <> ppr t
 
 instance Pretty shape => Pretty (TypeBase shape as) where
-  ppr (Prim et)    = ppr et
-  ppr (TypeVar et) = ppr $ baseName <$> qualNameFromTypeName et
-  ppr (Array at)   = ppr at
+  ppr (Prim et) = ppr et
+  ppr (TypeVar et targs) = ppr (baseName <$> qualNameFromTypeName et) <+> spread (map ppr targs)
+  ppr (Array at) = ppr at
   ppr (Record fs)
     | Just ts <- areTupleFields fs =
         parens $ commasep $ map ppr ts
     | otherwise =
         braces $ commasep $ map ppField $ M.toList fs
     where ppField (name, t) = text (nameToString name) <> colon <> ppr t
+
+instance Pretty shape => Pretty (TypeArg shape as) where
+  ppr (TypeArgDim d _) = brackets $ ppr d
+  ppr (TypeArgType t _) = ppr t
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeExp vn) where
   ppr (TEUnique t _) = text "*" <> ppr t
@@ -107,11 +112,11 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeExp vn) where
   ppr (TERecord fs _) = braces $ commasep $ map ppField fs
     where ppField (name, t) = text (nameToString name) <> colon <> ppr t
   ppr (TEVar name _) = ppr name
+  ppr (TEApply t args _) = ppr t <+> spread (map ppr args)
 
-instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeArg vn) where
-  ppr (TypeArgVarSize v _) = ppr v
-  ppr (TypeArgBoundSize v _) = ppr v
-  ppr (TypeArgConstSize k _) = ppr k
+instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeArgExp vn) where
+  ppr (TypeArgExpDim d _) = ppr d
+  ppr (TypeArgExpType d) = ppr d
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeDeclBase f vn) where
   ppr = ppr . declaredType
@@ -157,12 +162,12 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
   pprPrec _ (If c t f _ _) = text "if" <+> ppr c </>
                              text "then" <+> align (ppr t) </>
                              text "else" <+> align (ppr f)
-  pprPrec _ (Apply fname args _ _) = ppr fname <+>
-                                     spread (map (ppr . fst) args)
+  pprPrec _ (Apply fname args _ _) =
+    ppr fname <+> spread (map (ppr . fst) args)
   pprPrec _ (Negate e _) = text "-" <> ppr e
-  pprPrec p (LetPat pat e body _) =
+  pprPrec p (LetPat tparams pat e body _) =
     mparens $ align $
-    text "let" <+> align (ppr pat) <+>
+    text "let" <+> align (spread $ map ppr tparams ++ [ppr pat]) <+>
     (if linebreak
      then equals </> indent 2 (ppr e)
      else equals <+> align (ppr e)) <+> text "in" </>
@@ -179,9 +184,9 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
                         If{}       -> True
                         ArrayLit{} -> False
                         _          -> hasArrayLit e
-  pprPrec _ (LetFun fname (params, retdecl, _, e) body _) =
-    text "let" <+> ppr fname <+> spread (map ppr params) <> retdecl' <+> equals </>
-    indent 2 (ppr e) <+> text "in" </>
+  pprPrec _ (LetFun fname (tparams, params, retdecl, _, e) body _) =
+    text "let" <+> ppr fname <+> spread (map ppr tparams ++ map ppr params) <>
+    retdecl' <+> equals </> indent 2 (ppr e) <+> text "in" </>
     ppr body
     where retdecl' = case retdecl of
                        Just rettype -> text ":" <+> ppr rettype
@@ -245,8 +250,9 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
   pprPrec _ (Concat i x y _) =
     text "concat" <> text "@" <> ppr i <+> pprPrec 10 x <+> pprPrec 10 y
   pprPrec _ (Copy e _) = text "copy" <> pprPrec 10 e
-  pprPrec _ (DoLoop pat initexp form loopbody letbody _) =
-    text "loop" <+> parens (ppr pat <+> equals <+> ppr initexp) <+> equals <+>
+  pprPrec _ (DoLoop tparams pat initexp form loopbody letbody _) =
+    text "loop" <+> parens (spread (map ppr tparams ++ [ppr pat]) <+> equals
+                            <+> ppr initexp) <+> equals <+>
     ppr form <+>
     text "do" </>
     indent 2 (ppr loopbody) <+> text "in" </>
@@ -286,9 +292,9 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (LambdaBase ty vn) where
   ppr (CurryFun fname [] _ _) = text $ pretty fname
   ppr (CurryFun fname curryargs _ _) =
     ppr fname <+> apply (map ppr curryargs)
-  ppr (AnonymFun params body ascript _ _) =
+  ppr (AnonymFun tparams params body ascript _ _) =
     text "fn" <+>
-    apply (map ppr params) <> ppAscription ascript <+>
+    apply (map ppr tparams ++ map ppr params) <> ppAscription ascript <+>
     text "=>" </> indent 2 (ppr body)
   ppr (BinOpFun binop _ _ _ _) =
     ppr binop
@@ -322,13 +328,17 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ModExpBase ty vn) where
                                          Just (sig, _) -> colon <+> ppr sig
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeBindBase ty vn) where
-  ppr (TypeBind name usertype _) =
-    text "type" <+> ppr name <+> equals <+> ppr usertype
+  ppr (TypeBind name params usertype _) =
+    text "type" <+> ppr name <+> spread (map ppr params) <+> equals <+> ppr usertype
+
+instance (Eq vn, Hashable vn, Pretty vn) => Pretty (TypeParamBase vn) where
+  ppr (TypeParamDim name _) = brackets $ ppr name
+  ppr (TypeParamType name _) = text "'" <> ppr name
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (FunBindBase ty vn) where
-  ppr (FunBind entry name retdecl _ args body _) =
+  ppr (FunBind entry name retdecl _ tparams args body _) =
     text fun <+> ppr name <+>
-    spread (map ppr args) <> retdecl' <+> equals </>
+    spread (map ppr tparams ++ map ppr args) <> retdecl' <+> equals </>
     indent 2 (ppr body)
     where fun | entry     = "entry"
               | otherwise = "let"
@@ -344,9 +354,9 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ValBindBase ty vn) where
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (SpecBase ty vn) where
   ppr (TypeAbbrSpec tpsig) = ppr tpsig
-  ppr (TypeSpec name _) = text "type" <+> ppr name
-  ppr (ValSpec name params rettype _) =
-    text "val" <+> ppr name <> colon <+>
+  ppr (TypeSpec name ps _) = text "type" <+> ppr name <+> spread (map ppr ps)
+  ppr (ValSpec name tparams params rettype _) =
+    text "val" <+> ppr name <+> spread (map ppr tparams) <> colon <+>
     mconcat (map (\p -> ppr p <+> text "-> ") params) <+> ppr rettype
   ppr (ModSpec name sig _) =
     text "module" <+> ppr name <> colon <+> ppr sig

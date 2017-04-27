@@ -23,7 +23,7 @@ Identifiers and Keywords
    binop: `symbol`+
    qualbinop: `binop` | `quals` `binop`
    fieldid: `decimal` | `id`
-   symbol: "+" | "-" | "*" | "/" | "%" | "=" | "!" | ">" | "<" | "|" | "&" | "^"
+   symbol: "+" | "-" | "*" | "/" | "%" | "=" | "!" | ">" | "<" | "|" | "&" | "^" | "."
 
 Many things in Futhark are named. When we are defining something, we
 give it an unqualified name (`id`).  When referencing something inside
@@ -97,10 +97,11 @@ although they are not very useful-these are written ``()`` and are of
 type ``()``.
 
 .. productionlist::
-   type: `qualid` | `array_type` | `tuple_type` | `record_type`
+   type: `qualid` | `array_type` | `tuple_type` | `record_type` | `type` `type_arg`
    array_type: "[" [`dim`] "]" `type`
    tuple_type: "(" ")" | "(" `type` ("[" "," `type` "]")* ")"
    record_type: "{" "}" | "{" `fieldid` ":" `type` ("," `fieldid` ":" `type`)* "}"
+   type_arg: "[" [`dim`] "]" | `type`
    dim: `qualid` | `decimal` | "#" `id`
 
 An array value is written as a nonempty sequence of comma-separated
@@ -128,6 +129,11 @@ Records are mappings from field names to values, with the field names
 known statically.  A tuple behaves in all respects like a record with
 numeric field names, and vice versa.  It is an error for a record type
 to name the same field twice.
+
+A parametric type abbreviation can be applied by juxtaposing its name
+and its arguments.  The application must provide as many arguments as
+the type abbreviation has parameters - partial application is
+presently not allowed.  See `Type Abbreviations`_ for further details.
 
 String literals are supported, but only as syntactic sugar for arrays
 of ``i32`` values.  There is no ``char`` type in Futhark.
@@ -165,10 +171,10 @@ literals and variables, but also more complicated forms.
       : | `exp` `exp`
       : | `exp` ":" `type`
       : | "if" `exp` "then" `exp` "else" `exp`
-      : | "let" `pat` "=" `exp` "in" `exp`
+      : | "let" `type_param`* `pat` "=" `exp` "in" `exp`
       : | "let" `id` "[" `index` ("," `index`)* "]" "=" `exp` "in" `exp`
-      : | "let" `id` `pat`+ [":" `ty_exp`] "=" `exp` "in" `exp`
-      : | "loop" "(" `pat` [("=" `exp`)] ")" "=" `loopform` "do" `exp` in `exp`
+      : | "let" `id` `type_param`* `pat`+ [":" `type`] "=" `exp` "in" `exp`
+      : | "loop" "(" `type_param`* `pat` [("=" `exp`)] ")" "=" `loopform` "do" `exp` in `exp`
       : | "iota" `exp`
       : | "shape" `exp`
       : | "replicate" `exp` `exp`
@@ -467,7 +473,7 @@ If ``c`` evaluates to ``True``, evaluate ``a``, else evaluate ``b``.
 
 Evaluate ``e`` and bind the result to the pattern ``pat`` while
 evaluating ``body``.  The ``in`` keyword is optional if ``body`` is a
-``let`` or ``loop`` expression.
+``let`` or ``loop`` expression. See also `Shape Declarations`_.
 
 ``let a[i] = v in body``
 ........................................
@@ -483,7 +489,8 @@ of ``v`` must be an array of the proper size.  Syntactic sugar for
 Bind ``f`` to a function with the given parameters and definition
 (``e``) and evaluate ``body``.  The function will be treated as
 aliasing any free variables in ``e``.  The function is not in scope of
-itself, and hence cannot be recursive.
+itself, and hence cannot be recursive.  See also `Shape
+Declarations`_.
 
 ``loop (pat = initial) = for i < bound do loopbody in body``
 ............................................................
@@ -504,6 +511,8 @@ the pattern are taken from equivalently named variables in the
 environment.  I.e., ``loop (x) = ...`` is equivalent to ``loop (x = x)
 = ...``.
 
+See also `Shape Declarations`_.
+
 ``loop (pat = initial) = while cond do loopbody in body``
 ............................................................
 
@@ -513,6 +522,8 @@ environment.  I.e., ``loop (x) = ...`` is equivalent to ``loop (x = x)
    ``pat`` to be the value returned by the body.
 
 3. Evaluate ``body`` with ``pat`` bound to its final value.
+
+See also `Shape Declarations`_.
 
 ``iota n``
 ...........
@@ -690,7 +701,7 @@ with *n+1* components.  The partitioning is stable, meaning that
 elements of the partitions retain their original relative positions.
 
 ``scatter as is vs``
-..................
+....................
 
 The ``scatter`` expression calculates the equivalent of this imperative
 code::
@@ -708,11 +719,54 @@ performed to the same location), the result is unspecified.  It is not
 guaranteed that one of the duplicate writes will complete atomically -
 they may be interleaved.
 
+Shape Declarations
+------------------
+
+Whenever a pattern occurs (in ``let``, ``loop``, and function
+parameters), as well as in return types, *shape declarations* may be
+used to express invariants about the shapes of arrays
+that are accepted or produced by the function.  For example::
+
+  let f (a: [#n]i32) (b: [#n]i32): [n]i32 =
+    map (+) a b
+
+When prefixed with a ``#`` character, a name is *freshly bound*,
+whilst an unadorned name must be in scope.  In the example above,
+``#`` is not used in the return type, because we wish to refer to the
+``n`` bound by the parameters.  If we refer to the same freshly bound
+variable in multiple parameters (as above), each occurence must be
+prefixed with ``#``.  The sizes can also be explicitly quantified::
+
+  let f [n] (a: [n]i32) (b: [n]i32): [n]i32 =
+    map (+) a b
+
+This has the same meaning as above.  It is an error to mix explicit
+and implicit sizes.  Note that the ``[n]`` parameter need not be
+explicitly passed when calling ``f``.  Any explicitly bound size must
+be used in a parameters.  This is an error::
+
+  let f [n] (x: i32) = n
+
+A shape declaration can also be an integer constant (with no suffix).
+The dimension names bound can be used as ordinary variables within the
+scope of the parameters.  If a function is called with arguments, or
+returns a value, that does not fulfill the shape constraints, the
+program will fail with a runtime error.  Likewise, if a pattern with
+shape declarations is attempted bound to a value that does not fulfill
+the invariants, the program will fail with a runtime error.  For
+example, this will fail::
+
+  let x: [3]i32 = iota 2
+
+While this will succeed and bind ``n`` to ``2``::
+
+  let [n] x: [n]i32 = iota 2
+
 Declarations
 ------------
 
 .. productionlist::
-   dec:   `fun_bind` | `val_bind` | `ty_bind` | `mod_bind` | `mod_ty_bind`
+   dec:   `fun_bind` | `val_bind` | `type_bind` | `mod_bind` | `mod_type_bind`
       : | "open" `mod_exp`+
       : | `default_dec`
       : | "import" `stringlit`
@@ -721,11 +775,11 @@ Declaring Functions and Values
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. productionlist::
-   fun_bind:   ("let" | "entry") `id` `pat`+ [":" `ty_exp`] "=" `exp`
-           : | ("let" | "entry") `pat` `binop` `pat` [":" `ty_exp`] "=" `exp`
+   fun_bind:   ("let" | "entry") `id` `type_param`* `pat`+ [":" `type`] "=" `exp`
+           : | ("let" | "entry") `pat` `binop` `pat` [":" `type`] "=" `exp`
 
 .. productionlist::
-   val_bind: "let" `id` [":" `ty_exp`] "=" `exp`
+   val_bind: "let" `id` [":" `type`] "=" `exp`
 
 Functions and values must be defined before they are used.  A function
 declaration must specify the name, parameters, return type, and body
@@ -736,25 +790,14 @@ of the function::
 Type inference is not supported, and functions are fully monomorphic.
 A parameter is written as ``(name: type)``.  Functions may not be
 recursive.  Optionally, the programmer may put *shape declarations* in
-the return type and parameter types.  These can be used to express
-invariants about the shapes of arrays that are accepted or produced by
-the function, e.g::
+the return type and parameter types; see `Shape Declarations`_.  A
+function can be *polymorphic* by using type parameters, in the same
+way as for `Type Abbreviations`_::
 
-  let f (a: [#n]i32) (b: [#n]i32): [n]i32 =
-    map (+) a b
+  let reverse [n] 't (xs: [n]t): [n]t = xs[::-1]
 
-When prefixed with a ``#`` character, a name is *freshly bound*,
-whilst an unadorned name must be in scope.  In the example above, we
-do not use a ``#`` in the return type, because we wish to refer to the
-``n`` bound by the parameters.  If we refer to the same freshly bound
-variable in multiple parameters (as above), each occurence must be
-prefixed with ``#``.
-
-A shape declaration can also be an integer constant (with no suffix).
-The dimension names bound in a parameter shape declaration can be used
-as ordinary variables within the scope of the parameter.  If a
-function is called with arguments that do not fulfill the shape
-constraints, the program will fail with a runtime error.
+Shape and type parameters are not passed explicitly when calling
+function, but are automatically derived.
 
 User-Defined Operators
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -819,33 +862,49 @@ Type Abbreviations
 ~~~~~~~~~~~~~~~~~~
 
 .. productionlist::
-   ty_bind: "type" `id` "=" `type`
+   type_bind: "type" `id` `type_param`* "=" `type`
+   type_param: "[" `id` "]" | "'" `id`
 
-Futhark supports simple type abbreviations to improve code readability.
-Examples::
+Type abbreviations function as shorthands for purpose of documentation
+or brevity.  After a type binding ``type t1 = t2``, the name ``t1``
+can be used as a shorthand for the type ``t2``.  Type abbreviations do
+not create new unique types.  After the previous binding, the types
+``t1`` and ``t2`` are entirely interchangeable.
 
-  type person_id                = i32
-  type int_pair                 = (i32, i32)
-  type position, velocity, vec3 = (f32, f32, f32)
+A type abbreviation can have zero or more parameters.  A type
+parameter enclosed with square brackets is a *shape parameter*, and
+can be used in the definition as an array dimension size, or as a
+dimension argument to other type abbreviations.  When passing an
+argument for a shape parameter, it must be encloses in square
+brackets.  Example::
 
-  type pilot      = person_id
-  type passengers = []person_id
-  type mass       = f32
+  type two_intvecs [n] = ([n]i32, [n]i32)
 
-  type airplane = (pilot, passengers, position, velocity, mass)
+  let (a,b): two_intvecs [2] = (iota 2, replicate 2 0)
 
-The abbreviations are merely a syntactic convenience.  With respect to type
-checking the ``position`` and ``velocity`` types are identical.  It is
-currently not possible to put shape declarations in type abbreviations.
-When using uniqueness attributes with type abbreviations, inner uniqueness
-attributes are overrided by outer ones::
+Shape parameters work much like shape declarations for arrays.  Like
+shape declarations, they can be elided via square brackets containing
+nothing.
 
-  type uniqueInts = *[]i32
-  type nonuniqueIntLists = []intlist
-  type uniqueIntLists = *nonuniqueIntLists
+A type parameter prefixed with a single quote is a *type parameter*.
+It is in scope as a type in the definition of the type abbreviation.
+Whenever the type abbreviation is used in a type expression, a type
+argument must be passed for the parameter.  Type arguments need not be
+prefixed with single quotes::
+
+  type two_vecs [n] 't = ([n]t, [n]t)
+  type two_intvecs [n] = two_vecs [n] i32
+  let (a,b): two_vecs [2] i32 = (iota 2, replicate 2 0)
+
+When using uniqueness attributes with type abbreviations, inner
+uniqueness attributes are overrided by outer ones::
+
+  type unique_ints = *[]i32
+  type nonunique_int_lists = []unique_ints
+  type unique_int_lists = *nonunique_int_lists
 
   -- Error: using non-unique value for a unique return value.
-  let uniqueIntLists (nonuniqueIntLists p) = p
+  let f (p: nonunique_int_lists): unique_int_lists = p
 
 
 Module System
@@ -854,7 +913,7 @@ Module System
 .. productionlist::
    mod_bind: "module" `id` `mod_param`+ "=" [":" mod_type_exp] "=" `mod_exp`
    mod_param: "(" `id` ":" `mod_type_exp` ")"
-   mod_ty_bind: "module" "type" `id` "=" `mod_type_exp`
+   mod_type_bind: "module" "type" `id` `type_param`* "=" `mod_type_exp`
 
 Futhark supports an ML-style higher-order module system.  *Modules*
 can contain types, functions, and other modules.  *Module types* are
@@ -963,17 +1022,17 @@ Module Type Expressions
 .. productionlist::
    mod_type_exp:   `qualid`
              : | "{" `spec`* "}"
-             : | `mod_type_exp` "with" `qualid` "=" `ty_exp`
+             : | `mod_type_exp` "with" `qualid` "=" `type`
              : | "(" `mod_type_exp` ")"
              : | "(" `id` ":" `mod_type_exp` ")" "->" `mod_type_exp`
              : | `mod_type_exp` "->" `mod_type_exp`
 
 
 .. productionlist::
-   spec:   "val" `id` ":" `spec_type`
+   spec:   "val" `id` `type_param`* ":" `spec_type`
        : | "val" `binop` ":" `spec_type`
-       : | "type" `id` "=" `type`
-       : | "type `id`
+       : | "type" `id` `type_param`* "=" `type`
+       : | "type `id` `type_param`*
        : | "module" `id` ":" `mod_type_exp`
        : | "include" `mod_type_exp`
    spec_type: `type` | `type` "->" `spec_type`

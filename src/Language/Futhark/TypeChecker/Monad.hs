@@ -7,10 +7,11 @@ module Language.Futhark.TypeChecker.Monad
   , runTypeM
   , askEnv
   , askImportTable
-  , checkQualName
+  , checkQualNameWithEnv
   , bindSpaced
 
   , MonadTypeChecker(..)
+  , checkName
   , badOnLeft
 
   , require
@@ -27,9 +28,6 @@ module Language.Futhark.TypeChecker.Monad
   , FunBinding
   , TypeBinding(..)
   , MTy(..)
-
-  , envVals
-  , envMods
 
   , anySignedType
   , anyUnsignedType
@@ -97,7 +95,6 @@ data TypeError =
   | ValueIsNotFunction SrcLoc (QualName Name) Type
   | FunctionIsNotValue SrcLoc (QualName Name)
   | UniqueConstType SrcLoc Name (TypeBase Rank ())
-  | EntryPointConstReturnDecl SrcLoc Name (QualName Name)
   | UndeclaredFunctionReturnType SrcLoc (QualName Name)
   | UnappliedFunctor SrcLoc
 
@@ -188,10 +185,6 @@ instance Show TypeError where
   show (UniqueConstType loc name t) =
     "Constant " ++ pretty name ++ " defined with unique type " ++ pretty t ++ " at " ++
     locStr loc ++ ", which is not allowed."
-  show (EntryPointConstReturnDecl loc fname cname) =
-    "Use of constant " ++ pretty cname ++
-    " to annotate return type of entry point " ++ pretty fname ++
-    " at " ++ locStr loc ++ " is not allowed."
   show (UndeclaredFunctionReturnType loc fname) =
     "Function '" ++ pretty fname ++ "' with no return type declaration called at " ++
     locStr loc
@@ -212,9 +205,10 @@ data Mod = ModEnv Env
 data FunSig = FunSig TySet Mod MTy
             deriving (Show)
 
--- | Return type and a list of argument types, and names that are used
--- free inside the function.
-type FunBinding = ([StructType], StructType)
+-- | Type parameters, list of parameter types, and return type.  The
+-- type parameters are in scope in both parameter types and the return
+-- type.
+type FunBinding = ([TypeParam], [StructType], StructType)
 
 -- | Representation of a module type.
 data MTy = MTy { mtyAbs :: TySet
@@ -224,10 +218,10 @@ data MTy = MTy { mtyAbs :: TySet
          deriving (Show)
 
 -- | A binding from a name to its definition as a type.
-newtype TypeBinding = TypeAbbr StructType
+data TypeBinding = TypeAbbr [TypeParam] StructType
                  deriving (Show)
 
-data ValBinding = BoundV Type
+data ValBinding = BoundV StructType
                 | BoundF FunBinding
                 deriving (Show)
 
@@ -245,16 +239,6 @@ instance Monoid Env where
   mempty = Env mempty mempty mempty mempty mempty
   Env vt1 tt1 st1 mt1 nt1 `mappend` Env vt2 tt2 st2 mt2 nt2 =
     Env (vt1<>vt2) (tt1<>tt2) (st1<>st2) (mt1<>mt2) (nt1<>nt2)
-
-envVals :: Env -> [(VName, ([StructType], StructType))]
-envVals = map select . M.toList . envVtable
-  where select (name, BoundF fun) =
-          (name, fun)
-        select (name, BoundV t) =
-          (name, ([], vacuousShapeAnnotations $ toStruct t))
-
-envMods :: Env -> [(VName,Mod)]
-envMods = M.toList . envModTable
 
 -- | The warnings produced by the type checker.  The 'Show' instance
 -- produces a human-readable description.
@@ -313,13 +297,16 @@ class MonadError TypeError m => MonadTypeChecker m where
 
   bindNameMap :: NameMap -> m a -> m a
 
-  checkName :: Namespace -> Name -> SrcLoc -> m VName
+  checkQualName :: Namespace -> QualName Name -> SrcLoc -> m (QualName VName)
 
-  lookupType :: SrcLoc -> QualName Name -> m (QualName VName, StructType)
+  lookupType :: SrcLoc -> QualName Name -> m (QualName VName, [TypeParam], StructType)
   lookupMod :: SrcLoc -> QualName Name -> m (QualName VName, Mod)
   lookupMTy :: SrcLoc -> QualName Name -> m (QualName VName, MTy)
   lookupImport :: SrcLoc -> FilePath -> m Env
   lookupVar :: SrcLoc -> QualName Name -> m (QualName VName, Type)
+
+checkName :: MonadTypeChecker m => Namespace -> Name -> SrcLoc -> m VName
+checkName space name loc = qualLeaf <$> checkQualName space (qualName name) loc
 
 -- | @require ts e@ causes a 'TypeError' if @typeOf e@ does not unify
 -- with one of the types in @ts@.  Otherwise, simply returns @e@.
@@ -351,24 +338,22 @@ instance MonadTypeChecker TypeM where
     (env { envNameMap = m <> envNameMap env },
      imports)
 
-  checkName space name loc = do
-    (_, QualName _ name') <- checkQualName space (qualName name) loc
-    return name'
+  checkQualName space name loc = snd <$> checkQualNameWithEnv space name loc
 
   lookupType loc qn = do
-    (scope, qn'@(QualName _ name)) <- checkQualName Type qn loc
+    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Type qn loc
     case M.lookup name $ envTypeTable scope of
       Nothing -> bad $ UndefinedType loc qn
-      Just (TypeAbbr def) -> return (qn', def)
+      Just (TypeAbbr ps def) -> return (qn', ps, def)
 
   lookupMod loc qn = do
-    (scope, qn'@(QualName _ name)) <- checkQualName Structure qn loc
+    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Structure qn loc
     case M.lookup name $ envModTable scope of
       Nothing -> bad $ UnknownVariableError Structure qn loc
       Just m  -> return (qn', m)
 
   lookupMTy loc qn = do
-    (scope, qn'@(QualName _ name)) <- checkQualName Signature qn loc
+    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Signature qn loc
     (qn',) <$> maybe explode return (M.lookup name $ envSigTable scope)
     where explode = bad $ UnknownVariableError Signature qn loc
 
@@ -379,15 +364,15 @@ instance MonadTypeChecker TypeM where
       Just scope -> return scope
 
   lookupVar loc qn = do
-    (env, qn'@(QualName _ name)) <- checkQualName Term qn loc
+    (env, qn'@(QualName _ name)) <- checkQualNameWithEnv Term qn loc
     case M.lookup name $ envVtable env of
       Nothing -> bad $ UnknownVariableError Term qn loc
       Just (BoundV t) | "_" `isPrefixOf` pretty name -> bad $ UnderscoreUse loc qn
-                      | otherwise -> return (qn', t)
+                      | otherwise -> return (qn', removeShapeAnnotations $ fromStruct t)
       Just BoundF{} -> bad $ FunctionIsNotValue loc qn
 
-checkQualName :: Namespace -> QualName Name -> SrcLoc -> TypeM (Env, QualName VName)
-checkQualName space qn@(QualName quals name) loc = do
+checkQualNameWithEnv :: Namespace -> QualName Name -> SrcLoc -> TypeM (Env, QualName VName)
+checkQualNameWithEnv space qn@(QualName quals name) loc = do
   env <- askEnv
   descend env quals
   where descend scope []

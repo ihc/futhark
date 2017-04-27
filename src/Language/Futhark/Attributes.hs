@@ -22,10 +22,10 @@ module Language.Futhark.Attributes
   , typeOf
 
   -- * Queries on patterns
-  , patNameSet
   , patIdentSet
   , patternType
   , patternStructType
+  , patternNoShapeAnnotations
 
   -- * Queries on types
   , uniqueness
@@ -33,17 +33,17 @@ module Language.Futhark.Attributes
   , recordArrayElemUniqueness
   , aliases
   , diet
+  , subuniqueOf
   , subtypeOf
   , similarTo
   , arrayRank
   , arrayDims
-  , arrayDims'
   , nestedDims
-  , nestedDims'
   , arrayShape
   , returnType
   , lambdaReturnType
   , concreteType
+  , dimsBoundByType
 
   -- * Operations on types
   , peelArray
@@ -80,6 +80,7 @@ module Language.Futhark.Attributes
   , UncheckedModExp
   , UncheckedSigExp
   , UncheckedLambda
+  , UncheckedTypeParam
   , UncheckedPattern
   , UncheckedFunBind
   , UncheckedDec
@@ -87,7 +88,6 @@ module Language.Futhark.Attributes
   )
   where
 
-import           Control.Arrow           (second)
 import           Control.Monad.Writer
 import           Data.Foldable
 import           Data.Hashable
@@ -97,6 +97,8 @@ import           Data.List
 import           Data.Loc
 import           Data.Maybe
 import           Data.Ord
+import           Data.Bifunctor
+import           Data.Bifoldable
 
 import           Prelude
 
@@ -115,36 +117,26 @@ arrayRank = shapeRank . arrayShape
 -- | Return the shape of a type - for non-arrays, this is 'mempty'.
 arrayShape :: ArrayShape shape =>
               TypeBase shape as -> shape
-arrayShape (Array (PrimArray _ ds _ _)) = ds
-arrayShape (Array (PolyArray _ ds _ _)) = ds
-arrayShape (Array (RecordArray _ ds _)) = ds
-arrayShape _                            = mempty
-
--- | Return the shape of a type - for non-arrays, this is 'mempty'.
-arrayShape' :: TypeExp vn -> ShapeDecl vn
-arrayShape' (TEArray t d _) = ShapeDecl [d] <> arrayShape' t
-arrayShape' (TEUnique t _)  = arrayShape' t
-arrayShape' _               = mempty
+arrayShape (Array (PrimArray _ ds _ _))   = ds
+arrayShape (Array (PolyArray _ _ ds _ _)) = ds
+arrayShape (Array (RecordArray _ ds _))   = ds
+arrayShape _                              = mempty
 
 -- | Return the dimensions of a type with (possibly) known dimensions.
 arrayDims :: Ord vn => TypeBase (ShapeDecl vn) as -> [DimDecl vn]
 arrayDims = shapeDims . arrayShape
 
--- | Return the dimensions of a type with (possibly) known dimensions.
-arrayDims' :: TypeExp vn -> [DimDecl vn]
-arrayDims' = shapeDims . arrayShape'
-
 -- | Return any shape declaration in the type, with duplicates removed.
-nestedDims :: Ord vn => TypeBase (ShapeDecl vn) as -> [DimDecl vn]
+nestedDims :: TypeBase (ShapeDecl VName) as -> [DimDecl VName]
 nestedDims t =
-  case t of Array a   -> nub $ arrayNestedDims a
-            Record fs -> nub $ fold $ fmap nestedDims fs
-            Prim{}    -> mempty
-            TypeVar{} -> mempty
+  case t of Array a         -> nub $ arrayNestedDims a
+            Record fs       -> nub $ fold $ fmap nestedDims fs
+            Prim{}          -> mempty
+            TypeVar _ targs -> concatMap typeArgDims targs
   where arrayNestedDims (PrimArray _ ds _ _) =
           shapeDims ds
-        arrayNestedDims (PolyArray _ ds _ _) =
-          shapeDims ds
+        arrayNestedDims (PolyArray _ targs ds _ _) =
+          shapeDims ds <> concatMap typeArgDims targs
         arrayNestedDims (RecordArray ts ds _) =
           shapeDims ds <> fold (fmap recordArrayElemNestedDims ts)
         recordArrayElemNestedDims (ArrayArrayElem a) =
@@ -153,25 +145,27 @@ nestedDims t =
           fold $ fmap recordArrayElemNestedDims fs
         recordArrayElemNestedDims PrimArrayElem{} =
           mempty
-        recordArrayElemNestedDims PolyArrayElem{} =
-          mempty
+        recordArrayElemNestedDims (PolyArrayElem _ targs _ _) =
+          concatMap typeArgDims targs
 
--- | Return any shape declaration in the type, with duplicates removed.
-nestedDims' :: Ord vn => TypeExp vn -> [DimDecl vn]
-nestedDims' (TEArray t d _) = nub $ d : nestedDims' t
-nestedDims' (TETuple ts _)  = nub $ mconcat $ map nestedDims' ts
-nestedDims' (TEUnique t _)  = nestedDims' t
-nestedDims' _               = mempty
+        typeArgDims (TypeArgDim d _) = [d]
+        typeArgDims (TypeArgType at _) = nestedDims at
 
 -- | Set the dimensions of an array.  If the given type is not an
 -- array, return the type unchanged.
 setArrayShape :: TypeBase shape as -> shape -> TypeBase shape as
-setArrayShape (Array (PrimArray et _ u as)) ds = Array $ PrimArray et ds u as
-setArrayShape (Array (PolyArray v _ u as))  ds = Array $ PolyArray v ds u as
-setArrayShape (Array (RecordArray et _ u))  ds = Array $ RecordArray et ds u
-setArrayShape (Record ts)                   _  = Record ts
-setArrayShape (Prim t)                      _  = Prim t
-setArrayShape (TypeVar x)                   _  = TypeVar x
+setArrayShape (Array (PrimArray et _ u as)) ds =
+  Array $ PrimArray et ds u as
+setArrayShape (Array (PolyArray v targs _ u as)) ds =
+  Array $ PolyArray v targs ds u as
+setArrayShape (Array (RecordArray et _ u))  ds =
+  Array $ RecordArray et ds u
+setArrayShape (Record ts) _ =
+  Record ts
+setArrayShape (Prim t) _ =
+  Prim t
+setArrayShape (TypeVar x targs) _ =
+  TypeVar x targs
 
 -- | Change the shape of a type to be just the 'Rank'.
 removeShapeAnnotations :: ArrayShape shape =>
@@ -189,39 +183,7 @@ vacuousShapeAnnotations = modifyShapeAnnotations $ \shape ->
 modifyShapeAnnotations :: (oldshape -> newshape)
                        -> TypeBase oldshape as
                        -> TypeBase newshape as
-modifyShapeAnnotations f (Array at) =
-  Array $ modifyShapeAnnotationsFromArray f at
-modifyShapeAnnotations f (Record ts) =
-  Record $ fmap (modifyShapeAnnotations f) ts
-modifyShapeAnnotations _ (Prim t) =
-  Prim t
-modifyShapeAnnotations _ (TypeVar x) =
-  TypeVar x
-
-modifyShapeAnnotationsFromArray :: (oldshape -> newshape)
-                                -> ArrayTypeBase oldshape as
-                                -> ArrayTypeBase newshape as
-modifyShapeAnnotationsFromArray f (PrimArray et shape u as) =
-  PrimArray et (f shape) u as
-modifyShapeAnnotationsFromArray f (PolyArray et shape u as) =
-  PolyArray et (f shape) u as
-modifyShapeAnnotationsFromArray f (RecordArray ts shape u) =
-  RecordArray
-  (fmap (modifyShapeAnnotationsFromRecordArrayElem f) ts)
-  (f shape) u
-
--- Try saying this one three times fast.
-modifyShapeAnnotationsFromRecordArrayElem :: (oldshape -> newshape)
-                                          -> RecordArrayElemTypeBase oldshape as
-                                          -> RecordArrayElemTypeBase newshape as
-modifyShapeAnnotationsFromRecordArrayElem
-  _ (PrimArrayElem bt as u) = PrimArrayElem bt as u
-modifyShapeAnnotationsFromRecordArrayElem
-  _ (PolyArrayElem bt as u) = PolyArrayElem bt as u
-modifyShapeAnnotationsFromRecordArrayElem
-  f (ArrayArrayElem at) = ArrayArrayElem $ modifyShapeAnnotationsFromArray f at
-modifyShapeAnnotationsFromRecordArrayElem
-  f (RecordArrayElem ts) = RecordArrayElem $ fmap (modifyShapeAnnotationsFromRecordArrayElem f) ts
+modifyShapeAnnotations f = bimap f id
 
 -- | @x `subuniqueOf` y@ is true if @x@ is not less unique than @y@.
 subuniqueOf :: Uniqueness -> Uniqueness -> Bool
@@ -239,9 +201,11 @@ subtypeOf
   t1 == t2 &&
   dims1 == dims2
 subtypeOf
-  (Array (PolyArray t1 dims1 u1 _))
-  (Array (PolyArray t2 dims2 u2 _)) =
+  (Array (PolyArray t1 targs1 dims1 u1 _))
+  (Array (PolyArray t2 targs2 dims2 u2 _)) =
   u1 `subuniqueOf` u2 &&
+  length targs1 == length targs2 &&
+  and (zipWith subargOf targs1 targs2) &&
   t1 == t2 &&
   dims1 == dims2
 subtypeOf
@@ -258,8 +222,15 @@ subtypeOf (Record ts1) (Record ts2) =
   sort (M.keys ts1) == sort (M.keys ts2) &&
   length ts1 == length ts2 && and (M.intersectionWith subtypeOf ts1 ts2)
 subtypeOf (Prim bt1) (Prim bt2) = bt1 == bt2
-subtypeOf (TypeVar v1) (TypeVar v2) = v1 == v2
+subtypeOf (TypeVar v1 targs1) (TypeVar v2 targs2) =
+  v1 == v2 && length targs1 == length targs2 &&
+  and (zipWith subargOf targs1 targs2)
 subtypeOf _ _ = False
+
+subargOf :: ArrayShape shape => TypeArg shape as1 -> TypeArg shape as2 -> Bool
+subargOf TypeArgDim{} TypeArgDim{} = True
+subargOf (TypeArgType t1 _) (TypeArgType t2 _) = t1 `subtypeOf` t2
+subargOf _ _ = False
 
 -- | @x \`similarTo\` y@ is true if @x@ and @y@ are the same type,
 -- ignoring uniqueness.
@@ -271,16 +242,16 @@ similarTo t1 t2 = t1 `subtypeOf` t2 || t2 `subtypeOf` t1
 
 -- | Return the uniqueness of a type.
 uniqueness :: TypeBase shape as -> Uniqueness
-uniqueness (Array (PrimArray _ _ u _)) = u
-uniqueness (Array (PolyArray _ _ u _)) = u
-uniqueness (Array (RecordArray _ _ u)) = u
-uniqueness _                           = Nonunique
+uniqueness (Array (PrimArray _ _ u _))   = u
+uniqueness (Array (PolyArray _ _ _ u _)) = u
+uniqueness (Array (RecordArray _ _ u))   = u
+uniqueness _                             = Nonunique
 
 recordArrayElemUniqueness :: RecordArrayElemTypeBase shape as -> Uniqueness
 recordArrayElemUniqueness (PrimArrayElem _ _ u) = u
-recordArrayElemUniqueness (PolyArrayElem _ _ u) = u
+recordArrayElemUniqueness (PolyArrayElem _ _ _ u) = u
 recordArrayElemUniqueness (ArrayArrayElem (PrimArray _ _ u _)) = u
-recordArrayElemUniqueness (ArrayArrayElem (PolyArray _ _ u _)) = u
+recordArrayElemUniqueness (ArrayArrayElem (PolyArray _ _ _ u _)) = u
 recordArrayElemUniqueness (ArrayArrayElem (RecordArray _ _ u)) = u
 recordArrayElemUniqueness (RecordArrayElem ts) = fold $ fmap recordArrayElemUniqueness ts
 
@@ -291,38 +262,20 @@ unique = (==Unique) . uniqueness
 -- | Return the set of all variables mentioned in the aliasing of a
 -- type.
 aliases :: Monoid as => TypeBase shape as -> as
-aliases (Array (PrimArray _ _ _ als)) = als
-aliases (Array (PolyArray _ _ _ als)) = als
-aliases (Array (RecordArray ts _ _))  = fold $ fmap recordArrayElemAliases ts
-aliases (Record et)                   = fold $ fmap aliases et
-aliases (Prim _)                      = mempty
-aliases (TypeVar _)                   = mempty
-
-recordArrayElemAliases :: Monoid as =>
-                         RecordArrayElemTypeBase shape as -> as
-recordArrayElemAliases (PrimArrayElem _ als _) = als
-recordArrayElemAliases (PolyArrayElem _ als _) = als
-recordArrayElemAliases (ArrayArrayElem (PrimArray _ _ _ als)) =
-  als
-recordArrayElemAliases (ArrayArrayElem (PolyArray _ _ _ als)) =
-  als
-recordArrayElemAliases (ArrayArrayElem (RecordArray ts _ _)) =
-  fold $ M.map recordArrayElemAliases ts
-recordArrayElemAliases (RecordArrayElem ts) =
-  fold $ M.map recordArrayElemAliases ts
+aliases = bifoldMap (const mempty) id
 
 -- | @diet t@ returns a description of how a function parameter of
 -- type @t@ might consume its argument.
 diet :: TypeBase shape as -> Diet
-diet (Record ets)                        = RecordDiet $ fmap diet ets
-diet (Prim _)                            = Observe
-diet (TypeVar _)                         = Observe
-diet (Array (PrimArray _ _ Unique _))    = Consume
-diet (Array (PrimArray _ _ Nonunique _)) = Observe
-diet (Array (PolyArray _ _ Unique _))    = Consume
-diet (Array (PolyArray _ _ Nonunique _)) = Observe
-diet (Array (RecordArray _ _ Unique))    = Consume
-diet (Array (RecordArray _ _ Nonunique)) = Observe
+diet (Record ets)                          = RecordDiet $ fmap diet ets
+diet (Prim _)                              = Observe
+diet TypeVar{}                             = Observe
+diet (Array (PrimArray _ _ Unique _))      = Consume
+diet (Array (PrimArray _ _ Nonunique _))   = Observe
+diet (Array (PolyArray _ _ _ Unique _))    = Consume
+diet (Array (PolyArray _ _ _ Nonunique _)) = Observe
+diet (Array (RecordArray _ _ Unique))      = Consume
+diet (Array (RecordArray _ _ Nonunique))   = Observe
 
 -- | @t `maskAliases` d@ removes aliases (sets them to 'mempty') from
 -- the parts of @t@ that are denoted as 'Consumed' by the 'Diet' @d@.
@@ -362,22 +315,22 @@ peelArray 0 t = Just t
 peelArray n (Array (PrimArray et shape _ _))
   | shapeRank shape == n =
     Just $ Prim et
-peelArray n (Array (PolyArray et shape _ _))
+peelArray n (Array (PolyArray et targs shape _ _))
   | shapeRank shape == n =
-    Just $ TypeVar et
+    Just $ TypeVar et targs
 peelArray n (Array (RecordArray ts shape _))
   | shapeRank shape == n =
     Just $ Record $ fmap asType ts
   where asType (PrimArrayElem bt _ _) = Prim bt
-        asType (PolyArrayElem bt _ _) = TypeVar bt
+        asType (PolyArrayElem bt targs _ _) = TypeVar bt targs
         asType (ArrayArrayElem at)    = Array at
         asType (RecordArrayElem ts')  = Record $ fmap asType ts'
 peelArray n (Array (PrimArray et shape u als)) = do
   shape' <- stripDims n shape
   return $ Array $ PrimArray et shape' u als
-peelArray n (Array (PolyArray et shape u als)) = do
+peelArray n (Array (PolyArray et targs shape u als)) = do
   shape' <- stripDims n shape
-  return $ Array $ PolyArray et shape' u als
+  return $ Array $ PolyArray et targs shape' u als
 peelArray n (Array (RecordArray et shape u)) = do
   shape' <- stripDims n shape
   return $ Array $ RecordArray et shape' u
@@ -403,14 +356,14 @@ arrayOf :: (ArrayShape shape, Monoid as) =>
         -> TypeBase shape as
 arrayOf (Array (PrimArray et shape1 _ als)) shape2 u =
   Array $ PrimArray et (shape2 <> shape1) u als
-arrayOf (Array (PolyArray et shape1 _ als)) shape2 u =
-  Array $ PolyArray et (shape2 <> shape1) u als
+arrayOf (Array (PolyArray et targs shape1 _ als)) shape2 u =
+  Array $ PolyArray et targs (shape2 <> shape1) u als
 arrayOf (Array (RecordArray et shape1 _)) shape2 u =
   Array $ RecordArray et (shape2 <> shape1) u
 arrayOf (Prim et) shape u =
   Array $ PrimArray et shape u mempty
-arrayOf (TypeVar x) shape u =
-  Array $ PolyArray x shape u mempty
+arrayOf (TypeVar x targs) shape u =
+  Array $ PolyArray x targs shape u mempty
 arrayOf (Record ts) shape u =
   Array $ RecordArray (fmap (`typeToRecordArrayElem` u) ts) shape u
 
@@ -418,17 +371,17 @@ typeToRecordArrayElem :: Monoid as =>
                         TypeBase shape as
                      -> Uniqueness
                      -> RecordArrayElemTypeBase shape as
-typeToRecordArrayElem (Prim bt)    u = PrimArrayElem bt mempty u
-typeToRecordArrayElem (TypeVar bt) u = PolyArrayElem bt mempty u
-typeToRecordArrayElem (Record ts') u = RecordArrayElem $ fmap (`typeToRecordArrayElem` u) ts'
-typeToRecordArrayElem (Array at)   _ = ArrayArrayElem at
+typeToRecordArrayElem (Prim bt)    u        = PrimArrayElem bt mempty u
+typeToRecordArrayElem (TypeVar bt targs) u  = PolyArrayElem bt targs mempty u
+typeToRecordArrayElem (Record ts') u        = RecordArrayElem $ fmap (`typeToRecordArrayElem` u) ts'
+typeToRecordArrayElem (Array at)   _        = ArrayArrayElem at
 
 recordArrayElemToType :: RecordArrayElemTypeBase shape as
                      -> TypeBase shape as
-recordArrayElemToType (PrimArrayElem bt _ _) = Prim bt
-recordArrayElemToType (PolyArrayElem bt _ _) = TypeVar bt
-recordArrayElemToType (RecordArrayElem ts)   = Record $ fmap recordArrayElemToType ts
-recordArrayElemToType (ArrayArrayElem at)    = Array at
+recordArrayElemToType (PrimArrayElem bt _ _)       = Prim bt
+recordArrayElemToType (PolyArrayElem bt targs _ _) = TypeVar bt targs
+recordArrayElemToType (RecordArrayElem ts)         = Record $ fmap recordArrayElemToType ts
+recordArrayElemToType (ArrayArrayElem at)          = Array at
 
 -- | @arrayType n t@ is the type of @n@-dimensional arrays having @t@ as
 -- the base type.  If @t@ is itself an m-dimensional array, the result
@@ -452,10 +405,10 @@ stripArray n (Array (PrimArray et shape u als))
   | Just shape' <- stripDims n shape =
     Array $ PrimArray et shape' u als
   | otherwise = Prim et
-stripArray n (Array (PolyArray et shape u als))
+stripArray n (Array (PolyArray et targs shape u als))
   | Just shape' <- stripDims n shape =
-    Array $ PolyArray et shape' u als
-  | otherwise = TypeVar et
+    Array $ PolyArray et targs shape' u als
+  | otherwise = TypeVar et targs
 stripArray n (Array (RecordArray fs shape u))
   | Just shape' <- stripDims n shape =
     Array $ RecordArray fs shape' u
@@ -506,8 +459,8 @@ setArrayUniqueness :: ArrayTypeBase shape as -> Uniqueness
                    -> ArrayTypeBase shape as
 setArrayUniqueness (PrimArray et dims _ als) u =
   PrimArray et dims u als
-setArrayUniqueness (PolyArray et dims _ als) u =
-  PolyArray et dims u als
+setArrayUniqueness (PolyArray et targs dims _ als) u =
+  PolyArray et targs dims u als
 setArrayUniqueness (RecordArray et dims _) u =
   RecordArray (fmap (`setRecordArrayElemUniqueness` u) et) dims u
 
@@ -515,8 +468,8 @@ setRecordArrayElemUniqueness :: RecordArrayElemTypeBase shape as -> Uniqueness
                             -> RecordArrayElemTypeBase shape as
 setRecordArrayElemUniqueness (PrimArrayElem bt als _) u =
   PrimArrayElem bt als u
-setRecordArrayElemUniqueness (PolyArrayElem bt als _) u =
-  PolyArrayElem bt als u
+setRecordArrayElemUniqueness (PolyArrayElem bt targs als _) u =
+  PolyArrayElem bt targs als u
 setRecordArrayElemUniqueness (ArrayArrayElem at) u =
   ArrayArrayElem $ setArrayUniqueness at u
 setRecordArrayElemUniqueness (RecordArrayElem ts) u =
@@ -531,36 +484,12 @@ setAliases t = addAliases t . const
 -- aliasing replaced by @f@ applied to that aliasing.
 addAliases :: TypeBase shape asf -> (asf -> ast)
            -> TypeBase shape ast
-addAliases (Array at) f =
-  Array $ addArrayAliases at f
-addAliases (Record ts) f =
-  Record $ fmap (`addAliases` f) ts
-addAliases (Prim et) _ =
-  Prim et
-addAliases (TypeVar et) _ =
-  TypeVar et
-
-addArrayAliases :: ArrayTypeBase shape asf
-                -> (asf -> ast)
-                -> ArrayTypeBase shape ast
-addArrayAliases (PrimArray et dims u als) f =
-  PrimArray et dims u $ f als
-addArrayAliases (PolyArray et dims u als) f =
-  PolyArray et dims u $ f als
-addArrayAliases (RecordArray et dims u) f =
-  RecordArray (fmap (`addRecordArrayElemAliases` f) et) dims u
+addAliases t f = bimap id f t
 
 addRecordArrayElemAliases :: RecordArrayElemTypeBase shape asf
-                         -> (asf -> ast)
-                         -> RecordArrayElemTypeBase shape ast
-addRecordArrayElemAliases (PrimArrayElem bt als u) f =
-  PrimArrayElem bt (f als) u
-addRecordArrayElemAliases (PolyArrayElem bt als u) f =
-  PolyArrayElem bt (f als) u
-addRecordArrayElemAliases (ArrayArrayElem at) f =
-  ArrayArrayElem $ addArrayAliases at f
-addRecordArrayElemAliases (RecordArrayElem ts) f =
-  RecordArrayElem $ fmap (`addRecordArrayElemAliases` f) ts
+                          -> (asf -> ast)
+                          -> RecordArrayElemTypeBase shape ast
+addRecordArrayElemAliases t f = bimap id f t
 
 intValueType :: IntValue -> IntType
 intValueType Int8Value{}  = Int8
@@ -583,14 +512,14 @@ valueType :: Value -> TypeBase Rank ()
 valueType (PrimValue bv) = Prim $ primValueType bv
 valueType (ArrayValue _ (Prim et)) =
   Array $ PrimArray et (Rank 1) Nonunique ()
-valueType (ArrayValue _ (TypeVar et)) =
-  Array $ PolyArray et (Rank 1) Nonunique ()
+valueType (ArrayValue _ (TypeVar et targs)) =
+  Array $ PolyArray et targs (Rank 1) Nonunique ()
 valueType (ArrayValue _ (Record fs)) =
   Array $ RecordArray (fmap (`typeToRecordArrayElem` Nonunique) fs) (Rank 1) Nonunique
 valueType (ArrayValue _ (Array (PrimArray et shape _ _))) =
   Array $ PrimArray et (Rank $ 1 + shapeRank shape) Nonunique ()
-valueType (ArrayValue _ (Array (PolyArray et shape _ _))) =
-  Array $ PolyArray et (Rank $ 1 + shapeRank shape) Nonunique ()
+valueType (ArrayValue _ (Array (PolyArray et targs shape _ _))) =
+  Array $ PolyArray et targs (Rank $ 1 + shapeRank shape) Nonunique ()
 valueType (ArrayValue _ (Array (RecordArray et shape _))) =
   Array $ RecordArray et (Rank $ 1 + shapeRank shape) Nonunique
 
@@ -619,7 +548,7 @@ typeOf (Var qn (Info t) _) = t `addAliases` S.insert (qualLeaf qn)
 typeOf (Ascript e _ _) = typeOf e
 typeOf (Apply _ _ (Info t) _) = t
 typeOf (Negate e _) = typeOf e
-typeOf (LetPat _ _ body _) = typeOf body
+typeOf (LetPat _ _ _ body _) = typeOf body
 typeOf (LetFun _ _ body _) = typeOf body
 typeOf (LetWith _ _ _ _ body _) = typeOf body
 typeOf (Index ident idx _) =
@@ -677,7 +606,7 @@ typeOf (Split _ splitexps e _) =
   where n = case typeOf splitexps of Record ts -> length ts
                                      _         -> 1
 typeOf (Copy e _) = typeOf e `setUniqueness` Unique `setAliases` S.empty
-typeOf (DoLoop _ _ _ _ body _) = typeOf body
+typeOf (DoLoop _ _ _ _ _ body _) = typeOf body
 typeOf (Scatter a _i _v _) = typeOf a `setAliases` S.empty
 
 -- | The result of applying the arguments of the given types to a
@@ -693,7 +622,16 @@ returnType (Array at) ds args =
 returnType (Record fs) ds args =
   Record $ fmap (\et -> returnType et ds args) fs
 returnType (Prim t) _ _ = Prim t
-returnType (TypeVar t) _ _ = TypeVar t
+returnType (TypeVar t targs) ds args =
+  TypeVar t $ map (\arg -> typeArgReturnType arg ds args) targs
+
+typeArgReturnType :: (Ord vn, Hashable vn) =>
+                     TypeArg shape () -> [Diet] -> [CompTypeBase vn]
+                  -> TypeArg shape (Names vn)
+typeArgReturnType (TypeArgDim v loc) _ _ =
+  TypeArgDim v loc
+typeArgReturnType (TypeArgType t loc) ds args =
+  TypeArgType (returnType t ds args) loc
 
 arrayReturnType :: (Ord vn, Hashable vn) =>
                    ArrayTypeBase shape ()
@@ -703,15 +641,15 @@ arrayReturnType :: (Ord vn, Hashable vn) =>
 arrayReturnType (PrimArray bt sz Nonunique ()) ds args =
   PrimArray bt sz Nonunique als
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
-arrayReturnType (PolyArray bt sz Nonunique ()) ds args =
-  PolyArray bt sz Nonunique als
+arrayReturnType (PolyArray bt targs sz Nonunique ()) ds args =
+  PolyArray bt (map (\arg -> typeArgReturnType arg ds args) targs) sz Nonunique als
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
 arrayReturnType (RecordArray et sz Nonunique) ds args =
   RecordArray (fmap (\t -> recordArrayElemReturnType t ds args) et) sz Nonunique
 arrayReturnType (PrimArray et sz Unique ()) _ _ =
   PrimArray et sz Unique mempty
-arrayReturnType (PolyArray et sz Unique ()) _ _ =
-  PolyArray et sz Unique mempty
+arrayReturnType (PolyArray et targs sz Unique ()) ds args =
+  PolyArray et (map (\arg -> typeArgReturnType arg ds args) targs) sz Unique mempty
 arrayReturnType (RecordArray et sz Unique) _ _ =
   RecordArray (fmap (`addRecordArrayElemAliases` const mempty) et) sz Unique
 
@@ -723,8 +661,8 @@ recordArrayElemReturnType :: (Ord vn, Hashable vn) =>
 recordArrayElemReturnType (PrimArrayElem bt () u) ds args =
   PrimArrayElem bt als u
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
-recordArrayElemReturnType (PolyArrayElem bt () u) ds args =
-  PolyArrayElem bt als u
+recordArrayElemReturnType (PolyArrayElem bt targs () u) ds args =
+  PolyArrayElem bt (map (\arg -> typeArgReturnType arg ds args) targs) als u
   where als = mconcat $ map aliases $ zipWith maskAliases args ds
 recordArrayElemReturnType (ArrayArrayElem at) ds args =
   ArrayArrayElem $ arrayReturnType at ds args
@@ -734,7 +672,7 @@ recordArrayElemReturnType (RecordArrayElem ts) ds args =
 -- | The specified return type of a lambda.
 lambdaReturnType :: Ord vn =>
                     LambdaBase Info vn -> TypeBase Rank ()
-lambdaReturnType (AnonymFun _ _ _ (Info t) _)       = removeShapeAnnotations t
+lambdaReturnType (AnonymFun _ _ _ _ (Info t) _)     = removeShapeAnnotations t
 lambdaReturnType (CurryFun _ _ (Info (_, t)) _)     = toStruct t
 lambdaReturnType (BinOpFun _ _ _ (Info t) _)        = toStruct t
 lambdaReturnType (CurryBinOpLeft _ _ _ (Info t) _)  = toStruct t
@@ -755,30 +693,24 @@ concreteType (Array at) = concreteArrayType at
         concreteRecordArrayElem PolyArrayElem{} = False
         concreteRecordArrayElem (RecordArrayElem fs) = all concreteRecordArrayElem fs
 
--- | The set of names bound in a pattern, including dimension declarations.
-patNameSet :: (Ord vn, Hashable vn) => PatternBase NoInfo vn -> S.Set vn
-patNameSet =  S.fromList . map identName . patIdentsGen sizeIdent
-  where sizeIdent name = Ident name NoInfo
+-- | The dimension names bound by the shape declarations in the type.
+dimsBoundByType :: TypeBase (ShapeDecl VName) als -> S.Set VName
+dimsBoundByType = S.fromList . mapMaybe dimIdent . nestedDims
+  where dimIdent AnyDim          = Nothing
+        dimIdent (ConstDim _)    = Nothing
+        dimIdent (NamedDim _)    = Nothing
+        dimIdent (BoundDim name) = Just name
 
 -- | The set of identifiers bound in a pattern, including dimension declarations.
-patIdentSet :: (Ord vn, Hashable vn) => PatternBase Info vn -> S.Set (IdentBase Info vn)
-patIdentSet = S.fromList . patIdentsGen sizeIdent
-  where sizeIdent name = Ident name (Info $ Prim $ Signed Int32)
-
-patIdentsGen :: (Ord vn, Hashable vn) =>
-                (vn -> SrcLoc -> IdentBase f vn) -> PatternBase f vn
-             -> [IdentBase f vn]
-patIdentsGen _ (Id ident)              = [ident]
-patIdentsGen f (PatternParens p _)     = patIdentsGen f p
-patIdentsGen f (TuplePattern pats _)   = mconcat $ map (patIdentsGen f) pats
-patIdentsGen f (RecordPattern fs _)    = mconcat $ map (patIdentsGen f . snd) fs
-patIdentsGen _ Wildcard{}              = []
-patIdentsGen f (PatternAscription p t) =
-  patIdentsGen f p <> mapMaybe (dimIdent (srclocOf p)) (nestedDims' (declaredType t))
-  where dimIdent _ AnyDim            = Nothing
-        dimIdent _ (ConstDim _)      = Nothing
-        dimIdent _ (NamedDim _)      = Nothing
-        dimIdent loc (BoundDim name) = Just $ f name loc
+patIdentSet :: PatternBase Info VName -> S.Set (IdentBase Info VName)
+patIdentSet (Id ident)              = S.singleton ident
+patIdentSet (PatternParens p _)     = patIdentSet p
+patIdentSet (TuplePattern pats _)   = mconcat $ map patIdentSet pats
+patIdentSet (RecordPattern fs _)    = mconcat $ map (patIdentSet . snd) fs
+patIdentSet Wildcard{}              = mempty
+patIdentSet (PatternAscription p (TypeDecl _ (Info t))) =
+  patIdentSet p <> S.map asIdent (dimsBoundByType t)
+  where asIdent name = Ident name (Info $ Prim $ Signed Int32) (srclocOf p)
 
 -- | The type of values bound by the pattern.
 patternType :: PatternBase Info VName -> CompTypeBase VName
@@ -797,6 +729,23 @@ patternStructType (Id v) = vacuousShapeAnnotations $ toStruct $ unInfo $ identTy
 patternStructType (TuplePattern ps _) = tupleRecord $ map patternStructType ps
 patternStructType (RecordPattern fs _) = Record $ patternStructType <$> M.fromList fs
 patternStructType (Wildcard (Info t) _) = vacuousShapeAnnotations $ toStruct t
+
+-- | Remove all shape annotations from a pattern, leaving them unnamed
+-- instead.  Note that this will change the names bound by the
+-- pattern.
+patternNoShapeAnnotations :: PatternBase Info VName -> PatternBase Info VName
+patternNoShapeAnnotations (PatternAscription p (TypeDecl te (Info t))) =
+  PatternAscription (patternNoShapeAnnotations p) $
+  TypeDecl te $ Info $ vacuousShapeAnnotations t
+patternNoShapeAnnotations (PatternParens p loc) =
+  PatternParens (patternNoShapeAnnotations p) loc
+patternNoShapeAnnotations (Id v) = Id v
+patternNoShapeAnnotations (TuplePattern ps loc) =
+  TuplePattern (map patternNoShapeAnnotations ps) loc
+patternNoShapeAnnotations (RecordPattern ps loc) =
+  RecordPattern (map (fmap patternNoShapeAnnotations) ps) loc
+patternNoShapeAnnotations (Wildcard t loc) =
+  Wildcard t loc
 
 -- | Names of primitive types to types.  This is only valid if no
 -- shadowing is going on, but useful for tools.
@@ -820,7 +769,7 @@ data Intrinsic = IntrinsicMonoFun [PrimType] PrimType
 -- | A map of all built-ins.
 intrinsics :: M.Map VName Intrinsic
 intrinsics = M.fromList $ zipWith namify [0..] $
-             map (second $ uncurry IntrinsicMonoFun)
+             map (\(name, (ts,t)) -> (name, IntrinsicMonoFun ts t))
              [("sqrt32", ([FloatType Float32], FloatType Float32))
              ,("log32", ([FloatType Float32], FloatType Float32))
              ,("exp32", ([FloatType Float32], FloatType Float32))
@@ -1003,6 +952,9 @@ type UncheckedSigExp = SigExpBase NoInfo Name
 
 -- | A lambda with no type annotations.
 type UncheckedLambda = LambdaBase NoInfo Name
+
+-- | A type parameter with no type annotations.
+type UncheckedTypeParam = TypeParamBase Name
 
 -- | A pattern with no type annotations.
 type UncheckedPattern = PatternBase NoInfo Name

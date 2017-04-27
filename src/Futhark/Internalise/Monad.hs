@@ -3,36 +3,53 @@ module Futhark.Internalise.Monad
   ( InternaliseM
   , runInternaliseM
   , throwError
-  , FunTable
-  , TypeTable
   , VarSubstitutions
   , DecSubstitutions
   , InternaliseEnv (..)
   , ConstParams
   , Closure
-  , FunBinding (..)
+  , FunInfo
+  , SpecArgs
+  , SpecParams
+  , TypeEntry
   , ModBinding (..)
 
+  , substitutingVars
+  , allSubsts
   , addFunction
 
   , lookupFunction
   , lookupFunction'
-  , lookupTypeVar
   , lookupMod
   , lookupSubst
   , newOrExistingSubst
 
   , bindingIdentTypes
   , bindingParamTypes
-  , noteFunctions
+  , noteFunction
   , noteMod
   , noteType
+  , notingTypes
+  , notedTypes
   , noteDecSubsts
   , generatingFunctor
   , withDecSubstitutions
 
   , asserting
   , assertingOne
+
+  -- * Type Handling
+  , InternaliseTypeM
+  , liftInternaliseM
+  , runInternaliseTypeM
+  , lookupTypeVar
+  , lookupTypeVar'
+  , lookupDim
+  , withTypes
+  , withDims
+  , DimTable
+  , TypeTable
+  , withTypeDecSubstitutions
 
     -- * Convenient reexports
   , module Futhark.Tools
@@ -47,6 +64,7 @@ import Control.Monad.Writer
 import Control.Monad.RWS hiding (mapM)
 
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Data.List
 import Data.Maybe
 
@@ -63,20 +81,32 @@ type ConstParams = [(Name,VName)]
 -- corresponds to the closure of a locally defined function.
 type Closure = [VName]
 
+-- | The type arguments to a polymorhic function.
+type SpecArgs = ([E.TypeBase E.Rank ()], [ExtType])
+
+-- | The type internalise arguments to a polymorhic function.
+type SpecParams = [ExtType]
+
 data FunBinding = FunBinding
-                  { internalFun :: (Name, ConstParams, Closure,
-                                    [VName], [DeclType],
-                                    [FParam],
-                                    [(SubExp,Type)] -> Maybe ExtRetType)
-                  , externalFun :: (E.StructType, [E.StructType])
-                  }
+  { polymorphicSpecialisations :: M.Map SpecParams FunInfo
+    -- ^ Already generated specialised functions.
+  , polymorphicSpecialise :: SpecArgs -> InternaliseM FunInfo
+    -- ^ Generate a new specialisation.
+  }
+
+type FunInfo = (Name, ConstParams, Closure,
+                [VName], [DeclType],
+                [FParam],
+                [(SubExp,Type)] -> Maybe ExtRetType)
 
 type FunTable = M.Map VName FunBinding
 
 data ModBinding = ModBinding DecSubstitutions E.ModExp
                 deriving (Show)
 
-type TypeTable = M.Map VName [TypeBase Rank NoUniqueness]
+type TypeEntry = (DecSubstitutions, [E.TypeParam], E.StructType)
+
+type TypeTable = M.Map VName TypeEntry
 
 -- | A mapping from external variable names to the corresponding
 -- internalised subexpressions.
@@ -134,9 +164,9 @@ instance MonadBinder InternaliseM where
     InternaliseM $ collectStms m
 
 runInternaliseM :: MonadFreshNames m =>
-                   FunTable -> InternaliseM ()
+                   InternaliseM ()
                 -> m (Either String [FunDef])
-runInternaliseM ftable (InternaliseM m) =
+runInternaliseM (InternaliseM m) =
   modifyNameSource $ \src -> do
   let onError e             = (Left e, src)
       onSuccess (funs,src') = (Right funs, src')
@@ -150,35 +180,37 @@ runInternaliseM ftable (InternaliseM m) =
                  , envFunctorSubsts = mempty
                  }
         newState src =
-          InternaliseState { stateFtable = ftable
+          InternaliseState { stateFtable = mempty
                            , stateTtable = mempty
                            , stateModTable = mempty
                            , stateDecSubsts = mempty
                            , stateNameSource = src
                            }
 
+substitutingVars :: VarSubstitutions -> InternaliseM a -> InternaliseM a
+substitutingVars substs = local $ \env -> env { envSubsts = substs <> envSubsts env }
+
 -- | Add a function definition to the program being constructed.
 addFunction :: FunDef -> InternaliseM ()
 addFunction = InternaliseM . lift . tell . InternaliseResult . pure
 
-lookupFunction' :: VName -> InternaliseM (Maybe FunBinding)
-lookupFunction' fname = do
-  ftable <- gets stateFtable
-  case M.lookup fname ftable of
-    Nothing   -> return Nothing
-    Just fun' -> return $ Just fun'
+lookupFunction' :: VName -> InternaliseM (Maybe FunInfo)
+lookupFunction' fname =
+  gets $ M.lookup [] <=< fmap polymorphicSpecialisations . M.lookup fname . stateFtable
 
-lookupFunction :: VName -> InternaliseM FunBinding
-lookupFunction fname =
-  maybe bad return =<< lookupFunction' fname
-  where bad = fail $
-              "Internalise.lookupFunction: Function '" ++ pretty fname ++ "' not found."
-
-lookupTypeVar :: VName -> InternaliseM [TypeBase Rank NoUniqueness]
-lookupTypeVar tname = do
-  t <- gets $ M.lookup tname. stateTtable
-  case t of Nothing -> fail $ "Internalise.lookupTypeVar: Type '" ++ pretty tname ++ "' not found"
-            Just t' -> return t'
+lookupFunction :: VName -> SpecArgs -> InternaliseM FunInfo
+lookupFunction fname types@(_, i_types) = do
+  fb <- maybe bad return =<< gets (M.lookup fname . stateFtable)
+  case M.lookup i_types $ polymorphicSpecialisations fb of
+    Just info -> return info
+    Nothing -> do
+      info <- polymorphicSpecialise fb types
+      let fb' = fb { polymorphicSpecialisations =
+                       M.insert i_types info $ polymorphicSpecialisations fb }
+      modify $ \s -> s { stateFtable = M.insert fname fb' $ stateFtable s }
+      return info
+  where bad =
+          fail $ "Internalise.lookupFunction: Function '" ++ pretty fname ++ "' not found."
 
 lookupMod :: VName -> InternaliseM ModBinding
 lookupMod mname = do
@@ -220,27 +252,41 @@ newOrExistingSubst name = do
 bindingIdentTypes :: [Ident] -> InternaliseM a
                   -> InternaliseM a
 bindingIdentTypes idents (InternaliseM m) =
-  InternaliseM $ localScope (typeEnvFromIdents idents) m
+  InternaliseM $ localScope (typeScopeFromIdents idents) m
 
-typeEnvFromIdents :: [Ident] -> Scope SOACS
-typeEnvFromIdents = M.fromList . map assoc
+typeScopeFromIdents :: [Ident] -> Scope SOACS
+typeScopeFromIdents = M.fromList . map assoc
   where assoc ident = (identName ident, LetInfo $ identType ident)
 
 bindingParamTypes :: [LParam] -> InternaliseM a
                   -> InternaliseM a
 bindingParamTypes = bindingIdentTypes . map paramIdent
 
-noteFunctions :: FunTable -> InternaliseM ()
-noteFunctions ftable_expansion =
-  modify $ \s -> s { stateFtable = ftable_expansion <> stateFtable s }
+noteFunction :: VName -> (SpecArgs -> InternaliseM FunInfo) -> InternaliseM ()
+noteFunction fname generate =
+  modify $ \s -> s { stateFtable = M.singleton fname entry <> stateFtable s }
+  where entry = FunBinding mempty generate
 
 noteMod :: VName -> DecSubstitutions -> E.ModExp -> InternaliseM ()
 noteMod name substs me =
   modify $ \s -> s { stateModTable = M.insert name (ModBinding substs me) $ stateModTable s }
 
-noteType :: VName -> [TypeBase Rank NoUniqueness] -> InternaliseM ()
-noteType name t =
-  modify $ \s -> s { stateTtable = M.insert name t $ stateTtable s }
+noteType :: VName -> TypeEntry -> InternaliseM ()
+noteType name entry =
+  modify $ \s -> s { stateTtable = M.insert name entry $ stateTtable s }
+
+-- | Expand the type table, run an action, and restore the old type
+-- table.  Any calls to 'noteType' during the action will be lost.
+notingTypes :: [(VName, TypeEntry)] -> InternaliseM a -> InternaliseM a
+notingTypes types m = do
+  old <- gets stateTtable
+  mapM_ (uncurry noteType) types
+  x <- m
+  modify $ \s -> s { stateTtable = old }
+  return x
+
+notedTypes :: InternaliseM TypeTable
+notedTypes = gets stateTtable
 
 setDecSubsts :: M.Map VName VName -> InternaliseM ()
 setDecSubsts substs = modify $ \s -> s { stateDecSubsts = substs }
@@ -323,3 +369,60 @@ asserting m = do
 assertingOne :: InternaliseM VName
              -> InternaliseM Certificates
 assertingOne m = asserting $ fmap pure m
+
+type DimTable = M.Map VName ExtDimSize
+
+data TypeEnv = TypeEnv { typeEnvTypes :: TypeTable
+                       , typeEnvDims  :: DimTable
+                       }
+
+type TypeState = (Int, M.Map VName Int, ConstParams)
+
+newtype InternaliseTypeM a =
+  InternaliseTypeM (ReaderT TypeEnv (StateT TypeState InternaliseM) a)
+  deriving (Functor, Applicative, Monad,
+            MonadReader TypeEnv,
+            MonadState TypeState,
+            MonadError String)
+
+liftInternaliseM :: InternaliseM a -> InternaliseTypeM a
+liftInternaliseM = InternaliseTypeM . lift . lift
+
+runInternaliseTypeM :: S.Set VName
+                    -> InternaliseTypeM a
+                    -> InternaliseM (a, M.Map VName Int, ConstParams)
+runInternaliseTypeM bound (InternaliseTypeM m) = do
+  types <- gets stateTtable
+  let bound' = M.fromList $ zip (S.toList bound) [0..]
+      dims = M.map Ext bound'
+      new_env = TypeEnv types dims
+      new_state = (S.size bound + 1, bound', mempty)
+  (x, (_, substs, cm)) <- runStateT (runReaderT m new_env) new_state
+  return (x, substs, cm)
+
+withTypes :: TypeTable -> InternaliseTypeM a -> InternaliseTypeM a
+withTypes ttable = local $ \env -> env { typeEnvTypes = ttable <> typeEnvTypes env }
+
+withDims :: DimTable -> InternaliseTypeM a -> InternaliseTypeM a
+withDims dtable = local $ \env -> env { typeEnvDims = dtable <> typeEnvDims env }
+
+lookupDim :: VName -> InternaliseTypeM (Maybe ExtDimSize)
+lookupDim name = M.lookup name <$> asks typeEnvDims
+
+lookupTypeVar' :: VName -> InternaliseTypeM (Maybe TypeEntry)
+lookupTypeVar' tname = M.lookup tname <$> asks typeEnvTypes
+
+lookupTypeVar :: VName -> InternaliseTypeM TypeEntry
+lookupTypeVar tname = do
+  t <- lookupTypeVar' tname
+  case t of Nothing -> fail $ "Internalise.lookupTypeVar: Type '" ++ pretty tname ++ "' not found"
+            Just x -> return x
+
+withTypeDecSubstitutions :: DecSubstitutions
+                         -> InternaliseTypeM a -> InternaliseTypeM a
+withTypeDecSubstitutions substs (InternaliseTypeM m) = do
+  s <- get
+  e <- ask
+  (x, s') <- liftInternaliseM $ withDecSubstitutions substs $ runStateT (runReaderT m e) s
+  put s'
+  return x
