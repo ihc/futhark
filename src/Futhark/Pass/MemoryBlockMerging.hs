@@ -26,10 +26,10 @@ import Futhark.Representation.ExplicitMemory
                BasicOp, Exp, Lambda, ExtLambda, FunDef, FParam, LParam, RetType)
 import Futhark.Analysis.Alias (aliasAnalysis)
 
-import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs as CDataStructs
-import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse as CLastUse
-import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.ArrayCoalescing as CArrayCoalescing
-import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.Interference as CInterference
+import qualified Futhark.Pass.MemoryBlockMerging.Legacy.DataStructs as LDataStructs
+import qualified Futhark.Pass.MemoryBlockMerging.Legacy.LastUse as LLastUse
+import qualified Futhark.Pass.MemoryBlockMerging.Legacy.ArrayCoalescing as LArrayCoalescing
+import qualified Futhark.Pass.MemoryBlockMerging.Legacy.Interference as LInterference
 
 import Futhark.Pass.MemoryBlockMerging.ArrayCoalescing (findCoalescings)
 
@@ -40,30 +40,30 @@ mergeMemoryBlocks = simplePass
                     "Transform program to reuse non-interfering memory blocks"
                     transformProg
 
-cosminCode :: Prog ExplicitMemory -> IO ()
-cosminCode prog = do
-  let lutab = CLastUse.lastUsePrg $ aliasAnalysis prog
-      envtab = CInterference.intrfAnPrg lutab prog
-      coaltab = CArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
+legacyCode :: Prog ExplicitMemory -> IO ()
+legacyCode prog = do
+  let lutab = LLastUse.lastUsePrg $ aliasAnalysis prog
+      envtab = LInterference.intrfAnPrg lutab prog
+      coaltab = LArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
       coal_info = map (\env ->
-                          (CDataStructs.dstmem env, CDataStructs.dstind env,
-                           S.toList $ CDataStructs.alsmem env, M.toList $ CDataStructs.optdeps env,
-                           map (\(k, CDataStructs.Coalesced _ (CDataStructs.MemBlock _ _ b indfun) sbst) ->
+                          (LDataStructs.dstmem env, LDataStructs.dstind env,
+                           S.toList $ LDataStructs.alsmem env, M.toList $ LDataStructs.optdeps env,
+                           map (\(k, LDataStructs.Coalesced _ (LDataStructs.MemBlock _ _ b indfun) sbst) ->
                                    (k,(b,indfun,M.toList sbst)))
-                            $ M.toList $ CDataStructs.vartab env)
+                            $ M.toList $ LDataStructs.vartab env)
                       ) $ M.elems coaltab
 
   putStrLn "Last use result:"
   putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
 
   putStrLn "Allocations result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . CInterference.alloc) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . LInterference.alloc) (M.elems envtab))
 
   putStrLn "Alias result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . CInterference.alias) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . LInterference.alias) (M.elems envtab))
 
   putStrLn "Interference result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . CInterference.intrf) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . LInterference.intrf) (M.elems envtab))
 
   putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
   putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
@@ -75,7 +75,7 @@ analyseProg prog = do
   let coalescings = findCoalescings prog
 
   putStrLn "Coalescings:"
-  putStrLn $ show coalescings
+  print coalescings
 
 
 
@@ -84,7 +84,7 @@ transformProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Prog ExplicitMem
 transformProg prog = do
 
   let debug = unsafePerformIO $ do
-        cosminCode prog
+        legacyCode prog
         analyseProg prog
 
   debug `seq` intraproceduralTransformation transformFunDef prog

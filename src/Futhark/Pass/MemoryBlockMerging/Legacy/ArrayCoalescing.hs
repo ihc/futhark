@@ -1,6 +1,6 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 -- | Playground for work on merging memory blocks
-module Futhark.Pass.MemoryBlockMerging.Cosmin.ArrayCoalescing
+module Futhark.Pass.MemoryBlockMerging.Legacy.ArrayCoalescing
   ( mkCoalsTab
   ) where
 
@@ -19,8 +19,8 @@ import Futhark.Analysis.PrimExp.Convert
 import Futhark.Representation.Aliases
 import qualified Futhark.Representation.ExplicitMemory as ExpMem
 import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
-import Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs
-import Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse
+import Futhark.Pass.MemoryBlockMerging.Legacy.DataStructs
+import Futhark.Pass.MemoryBlockMerging.Legacy.LastUse
 
 type ScopeTab = Scope (Aliases ExpMem.ExplicitMemory)
 -- ^ maps array-variable names to various info, including
