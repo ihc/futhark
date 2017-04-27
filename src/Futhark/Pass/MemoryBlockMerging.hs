@@ -75,7 +75,7 @@ analyseProg prog = do
   let coalescings = findCoalescings prog
 
   putStrLn "Coalescings:"
-  print coalescings
+  forM_ coalescings print
 
 
 
