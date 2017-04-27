@@ -1,6 +1,6 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 -- | Playground for work on merging memory blocks
-module Futhark.Pass.MemoryBlockMerging.Cosmin.Miscellaneous where
+module Futhark.Pass.MemoryBlockMerging.Cosmin.Interference where
 
 import Prelude
 import Data.Maybe

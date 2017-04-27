@@ -1,8 +1,8 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 -- | Merge memory blocks where possible.
 module Futhark.Pass.MemoryBlockMerging
-       ( mergeMemoryBlocks )
-       where
+  ( mergeMemoryBlocks
+  ) where
 
 import System.IO.Unsafe (unsafePerformIO) -- Just for debugging!
 
@@ -26,10 +26,12 @@ import Futhark.Representation.ExplicitMemory
                BasicOp, Exp, Lambda, ExtLambda, FunDef, FParam, LParam, RetType)
 import Futhark.Analysis.Alias (aliasAnalysis)
 
-import Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs
-import Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse
-import Futhark.Pass.MemoryBlockMerging.Cosmin.ArrayCoalescing
-import Futhark.Pass.MemoryBlockMerging.Cosmin.Miscellaneous
+import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.DataStructs as CDataStructs
+import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.LastUse as CLastUse
+import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.ArrayCoalescing as CArrayCoalescing
+import qualified Futhark.Pass.MemoryBlockMerging.Cosmin.Interference as CInterference
+
+import Futhark.Pass.MemoryBlockMerging.ArrayCoalescing (findCoalescings)
 
 
 mergeMemoryBlocks :: Pass ExplicitMemory ExplicitMemory
@@ -40,37 +42,50 @@ mergeMemoryBlocks = simplePass
 
 cosminCode :: Prog ExplicitMemory -> IO ()
 cosminCode prog = do
-  let lutab = lastUsePrg $ aliasAnalysis prog
-      envtab = intrfAnPrg lutab prog
-      coaltab = mkCoalsTab $ aliasAnalysis prog
+  let lutab = CLastUse.lastUsePrg $ aliasAnalysis prog
+      envtab = CInterference.intrfAnPrg lutab prog
+      coaltab = CArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
       coal_info = map (\env ->
-                          (dstmem env, dstind env,
-                           S.toList $ alsmem env, M.toList $ optdeps env,
-                           map (\(k, Coalesced _ (MemBlock _ _ b indfun) sbst) ->
+                          (CDataStructs.dstmem env, CDataStructs.dstind env,
+                           S.toList $ CDataStructs.alsmem env, M.toList $ CDataStructs.optdeps env,
+                           map (\(k, CDataStructs.Coalesced _ (CDataStructs.MemBlock _ _ b indfun) sbst) ->
                                    (k,(b,indfun,M.toList sbst)))
-                            $ M.toList $ vartab env)
+                            $ M.toList $ CDataStructs.vartab env)
                       ) $ M.elems coaltab
 
   putStrLn "Last use result:"
   putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
 
   putStrLn "Allocations result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . alloc) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . CInterference.alloc) (M.elems envtab))
 
   putStrLn "Alias result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . alias) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . CInterference.alias) (M.elems envtab))
 
   putStrLn "Interference result:"
-  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . intrf) (M.elems envtab))
+  putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . CInterference.intrf) (M.elems envtab))
 
   putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
   putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
+
+
+
+analyseProg :: Prog ExplicitMemory -> IO ()
+analyseProg prog = do
+  let coalescings = findCoalescings prog
+
+  putStrLn "Coalescings:"
+  putStrLn $ show coalescings
+
+
+
 
 transformProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Prog ExplicitMemory)
 transformProg prog = do
 
   let debug = unsafePerformIO $ do
         cosminCode prog
+        analyseProg prog
 
   debug `seq` intraproceduralTransformation transformFunDef prog
 
