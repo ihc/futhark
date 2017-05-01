@@ -174,6 +174,7 @@ createsNewArrOK (BasicOp Manifest{}) = True
 createsNewArrOK (BasicOp ExpMem.Copy{}) = True
 createsNewArrOK (BasicOp Concat{}) = True
 createsNewArrOK (BasicOp ArrayLit{}) = True
+createsNewArrOK (BasicOp Scratch{}) = True
 createsNewArrOK (Op (ExpMem.Inner ExpMem.Kernel{})) = True
 createsNewArrOK _ = False
 
