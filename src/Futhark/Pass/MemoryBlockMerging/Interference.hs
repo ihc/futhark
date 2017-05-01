@@ -1,6 +1,6 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 -- | Playground for work on merging memory blocks
-module Futhark.Pass.MemoryBlockMerging.Legacy.Interference where
+module Futhark.Pass.MemoryBlockMerging.Interference where
 
 import Prelude
 import Data.Maybe
@@ -13,7 +13,7 @@ import Futhark.Representation.Aliases
 import qualified Futhark.Representation.ExplicitMemory as ExpMem
 import qualified Futhark.Analysis.Alias as AnlAls
 
-import Futhark.Pass.MemoryBlockMerging.Legacy.DataStructs
+import Futhark.Pass.MemoryBlockMerging.DataStructs
 
 
 -----------------------------------

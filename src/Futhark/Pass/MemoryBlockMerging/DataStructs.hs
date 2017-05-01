@@ -1,5 +1,5 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
-module Futhark.Pass.MemoryBlockMerging.Legacy.DataStructs
+module Futhark.Pass.MemoryBlockMerging.DataStructs
        ( Coalesced(..),CoalescedKind(..), ArrayMemBound(..), AllocTab
        , V2MemTab, AliasTab, LUTabFun, LUTabPrg, ScalarTab,  CoalsTab
        , CoalsEntry(..), FreeVarSubsts

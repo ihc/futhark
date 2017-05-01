@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
--- | Array coalescing.
-module Futhark.Pass.MemoryBlockMerging.Detection
+-- | Detect array coalescings.  Alternative approach, not done (put on hold,
+-- just an idea).
+module Futhark.Pass.MemoryBlockMerging.Alternative.Detection
   ( findCoalescings
   ) where
 
