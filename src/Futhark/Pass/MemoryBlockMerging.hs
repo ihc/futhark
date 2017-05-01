@@ -31,7 +31,7 @@ import qualified Futhark.Pass.MemoryBlockMerging.Legacy.LastUse as LLastUse
 import qualified Futhark.Pass.MemoryBlockMerging.Legacy.ArrayCoalescing as LArrayCoalescing
 import qualified Futhark.Pass.MemoryBlockMerging.Legacy.Interference as LInterference
 
-import Futhark.Pass.MemoryBlockMerging.ArrayCoalescing (findCoalescings)
+import Futhark.Pass.MemoryBlockMerging.Detection (findCoalescings)
 
 
 mergeMemoryBlocks :: Pass ExplicitMemory ExplicitMemory
