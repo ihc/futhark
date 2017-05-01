@@ -118,13 +118,27 @@ findOptimisticsStm parent startScope (prevs, cur, nexts) finalResult =
                                   , oStmsFinalResult = finalResult
                                   , oContextParent = parent
                                   }
-  in case (patternValueElements $ bindingPattern cur,
-           bindingExp cur) of
+      (dst, dstMemory, ixFun) =
+        case patternValueElements $ bindingPattern cur of
+          [PatElem dst BindVar
+           (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)] ->
+            (dst, dstMemory, ixFun)
+          [PatElem dst (BindInPlace _ _dstIx dstSlice)
+           (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)] ->
+            let dstSlice' = map (fmap (primExpFromSubExp (IntType Int32))) dstSlice
+                ixFun' = IxFun.slice ixFun dstSlice'
+            in (dst, dstMemory, ixFun')
+          _ -> error "Should we handle this?"
 
-       -- @let dst = copy src@
-       ([PatElem dst BindVar
-         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-        BasicOp (Copy src)) ->
+  in case bindingExp cur of
+
+       -- Cases:
+       --
+       --   + @let dst = copy src@
+       --
+       --   + @let dst[i] = src@ -- the right-hand side can be just @src@ in the
+       --     source language, but is @copy src@ in the internal representation.
+       BasicOp (Copy src) ->
          [OptimisticCoalescing { oSource = src
                                , oDest = dst
                                , oDestMemory = dstMemory
@@ -132,22 +146,12 @@ findOptimisticsStm parent startScope (prevs, cur, nexts) finalResult =
                                , oContext = context
                                }]
 
-       -- @let dst[i] = src@
-       ([PatElem dst (BindInPlace _ _dstIx dstSlice)
-         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-         BasicOp (Copy src)) ->
-         let ixFun' = updateIxFunSlice ixFun dstSlice
-         in [OptimisticCoalescing { oSource = src
-                                  , oDest = dst
-                                  , oDestMemory = dstMemory
-                                  , oDestMemoryOffset = ixFun'
-                                  , oContext = context
-                                  }]
-
-       -- @let dst = concat(..., src)@
-       ([PatElem dst BindVar
-         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-         BasicOp (Concat _ 0 src0 srcs _)) ->
+       -- Cases:
+       --
+       --   + @let dst = concat(..., src, ...)@
+       --
+       --   + @let dst[i] = concat(..., src, ...)@
+       (BasicOp (Concat _ 0 src0 srcs _)) ->
          let offsetZero = primExpFromSubExp (IntType Int32) (constant (0 :: Int32))
          in reverse $ fst $ foldl (findOptimisticsConcatSrc scope)
             ([], offsetZero) (src0 : srcs)
@@ -178,9 +182,3 @@ findOptimisticsStm parent startScope (prevs, cur, nexts) finalResult =
 
        -- No other cases to handle (for now).
        _ -> []
-
-
-updateIxFunSlice :: ExpMem.IxFun -> Slice SubExp -> ExpMem.IxFun
-updateIxFunSlice ixFun slice =
-  let slice' = map (fmap (primExpFromSubExp (IntType Int32))) slice
-  in IxFun.slice ixFun slice'
