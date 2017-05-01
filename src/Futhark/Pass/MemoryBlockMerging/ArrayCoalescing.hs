@@ -20,9 +20,9 @@ import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
 
 
 data MemoryBlock = MemoryBlock
-  { destName :: VName
+  { dest :: VName
     -- ^ destination memory block
-  , destOffset :: ExpMem.IxFun
+  , destMemoryOffset :: ExpMem.IxFun
     -- ^ offset into the memory block
   }
   deriving (Show)
@@ -30,14 +30,20 @@ data MemoryBlock = MemoryBlock
 -- | A mapping from source variables to their new memory blocks.
 type Coalescings = M.Map VName MemoryBlock
 
+data OptimisticContext = OptimisticContext
+  { oStmsPrev :: [Stm (Aliases ExpMem.ExplicitMemory)]
+  , oStmsNext :: [Stm (Aliases ExpMem.ExplicitMemory)]
+  , oStmsFinalResult :: Result
+  , oContextParent :: Maybe OptimisticContext
+  }
+  deriving (Show)
+
 data OptimisticCoalescing = OptimisticCoalescing
   { oSource :: VName
   , oDest :: VName
-  , oDestMemory :: VName
+  , oDestMemory :: VName -- necessary?
   , oDestMemoryOffset :: ExpMem.IxFun
-  , oStmsPrev :: [Stm (Aliases ExpMem.ExplicitMemory)]
-  , oStmsNext :: [Stm (Aliases ExpMem.ExplicitMemory)]
-  , oStmsFinalResult :: Result
+  , oContext :: OptimisticContext
   }
   deriving (Show)
 
@@ -91,77 +97,87 @@ findOptimisticsFun :: FunDef (Aliases ExpMem.ExplicitMemory)
 findOptimisticsFun (FunDef _ _ _ fParams body) =
   let stms = bodyStms body
       stms' = zip3 (L.inits stms) stms (L.tail $ L.tails stms)
-      optimistics = concatMap (findOptimisticsStm (scopeOfFParams fParams) (bodyResult body)) stms'
+      optimistics = concatMap (\stm' -> findOptimisticsStm
+                                        Nothing
+                                        (scopeOfFParams fParams)
+                                        stm'
+                                        (bodyResult body)) stms'
   in optimistics
 
-findOptimisticsStm :: Scope (Aliases ExpMem.ExplicitMemory)
-                   -> Result
+findOptimisticsStm :: Maybe OptimisticContext
+                   -> Scope (Aliases ExpMem.ExplicitMemory)
                    -> ([Stm (Aliases ExpMem.ExplicitMemory)],
                        Stm (Aliases ExpMem.ExplicitMemory),
                        [Stm (Aliases ExpMem.ExplicitMemory)])
+                   -> Result
                    -> [OptimisticCoalescing]
-findOptimisticsStm startScope finalResult (prevs, cur, nexts) =
-  case (patternValueElements $ bindingPattern cur,
-        bindingExp cur) of
+findOptimisticsStm parent startScope (prevs, cur, nexts) finalResult =
+  let scope = startScope <> scopeOf prevs
+      context = OptimisticContext { oStmsPrev = prevs
+                                  , oStmsNext = nexts
+                                  , oStmsFinalResult = finalResult
+                                  , oContextParent = parent
+                                  }
+  in case (patternValueElements $ bindingPattern cur,
+           bindingExp cur) of
 
-    -- @let dst = copy src@
-    ([PatElem dst BindVar (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-     BasicOp (Copy src)) ->
-      [OptimisticCoalescing { oSource = src
-                            , oDest = dst
-                            , oDestMemory = dstMemory
-                            , oDestMemoryOffset = ixFun
-                            , oStmsPrev = prevs
-                            , oStmsNext = nexts
-                            , oStmsFinalResult = finalResult
-                            }]
-
-    -- @let dst[i] = src@
-    ([PatElem dst (BindInPlace _ _dstIx dstSlice) (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-     BasicOp (Copy src)) ->
-      let ixFun' = updateIxFunSlice ixFun dstSlice
-      in [OptimisticCoalescing { oSource = src
+       -- @let dst = copy src@
+       ([PatElem dst BindVar
+         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
+        BasicOp (Copy src)) ->
+         [OptimisticCoalescing { oSource = src
                                , oDest = dst
                                , oDestMemory = dstMemory
-                               , oDestMemoryOffset = ixFun'
-                               , oStmsPrev = prevs
-                               , oStmsNext = nexts
-                               , oStmsFinalResult = finalResult
+                               , oDestMemoryOffset = ixFun
+                               , oContext = context
                                }]
 
-    -- @let dst = concat(..., src)@
-    ([PatElem dst BindVar (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
-     BasicOp (Concat _ 0 src0 srcs _)) ->
-      let scope = startScope <> scopeOf prevs
-          offsetZero = primExpFromSubExp (IntType Int32) (constant (0 :: Int32))
-      in reverse $ fst $ foldl (findOptimisticsConcatSrc scope) ([], offsetZero) (src0 : srcs)
+       -- @let dst[i] = src@
+       ([PatElem dst (BindInPlace _ _dstIx dstSlice)
+         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
+         BasicOp (Copy src)) ->
+         let ixFun' = updateIxFunSlice ixFun dstSlice
+         in [OptimisticCoalescing { oSource = src
+                                  , oDest = dst
+                                  , oDestMemory = dstMemory
+                                  , oDestMemoryOffset = ixFun'
+                                  , oContext = context
+                                  }]
 
-      where findOptimisticsConcatSrc :: Scope (Aliases ExpMem.ExplicitMemory)
-                                     -> ([OptimisticCoalescing], PrimExp VName)
-                                     -> VName
-                                     -> ([OptimisticCoalescing], PrimExp VName)
-            findOptimisticsConcatSrc scope (optimistics, offset) src =
-              let ixFun' = IxFun.offsetIndex ixFun offset
-                  oc = OptimisticCoalescing { oSource = src
-                                            , oDest = dst
-                                            , oDestMemory = dstMemory
-                                            , oDestMemoryOffset = ixFun'
-                                            , oStmsPrev = prevs
-                                            , oStmsNext = nexts
-                                            , oStmsFinalResult = finalResult
-                                            } : optimistics
-                  offsetAfterSrc
-                    | Just scopeInfo <- M.lookup src scope,
-                      Array _ shape _ <- typeOf scopeInfo,
-                      (se : _) <- shapeDims shape =
-                        primExpFromSubExp (IntType Int32) se
-                    | otherwise = error "This should not happen."
-                  offset' = BinOpExp (Add Int32) offset offsetAfterSrc
-              in (oc, offset')
+       -- @let dst = concat(..., src)@
+       ([PatElem dst BindVar
+         (_, ExpMem.ArrayMem _ _ _ dstMemory ixFun)],
+         BasicOp (Concat _ 0 src0 srcs _)) ->
+         let offsetZero = primExpFromSubExp (IntType Int32) (constant (0 :: Int32))
+         in reverse $ fst $ foldl (findOptimisticsConcatSrc scope)
+            ([], offsetZero) (src0 : srcs)
 
-    _ -> []
+         where findOptimisticsConcatSrc :: Scope (Aliases ExpMem.ExplicitMemory)
+                                        -> ([OptimisticCoalescing], PrimExp VName)
+                                        -> VName
+                                        -> ([OptimisticCoalescing], PrimExp VName)
+               findOptimisticsConcatSrc scope (optimistics, offset) src =
+                 let ixFun' = IxFun.offsetIndex ixFun offset
+                     oc = OptimisticCoalescing { oSource = src
+                                               , oDest = dst
+                                               , oDestMemory = dstMemory
+                                               , oDestMemoryOffset = ixFun'
+                                               , oContext = context
+                                               } : optimistics
+                     offsetAfterSrc
+                       | Just scopeInfo <- M.lookup src scope,
+                         Array _ shape _ <- typeOf scopeInfo,
+                         (se : _) <- shapeDims shape =
+                           primExpFromSubExp (IntType Int32) se
+                       | otherwise = error "This should not happen."
+                     offset' = BinOpExp (Add Int32) offset offsetAfterSrc
+                 in (oc, offset')
 
--- recursive?
+       -- Recursively consider the sub-bodies.
+       -- ...
+
+       -- No other cases to handle (for now).
+       _ -> []
 
 
 updateIxFunSlice :: ExpMem.IxFun -> Slice SubExp -> ExpMem.IxFun
