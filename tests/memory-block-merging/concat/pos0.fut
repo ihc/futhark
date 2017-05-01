@@ -1,5 +1,8 @@
 -- Memory block merging with a concat of multiple arrays.  Requires allocation
 -- hoisting of the memory block for 't3'.
+-- ==
+-- input { [5, 15] }
+-- output { [6, 16, 10, 30, 1, 5] }
 
 let main (ns: []i32): []i32 =
   let t0 = map (+ 1) ns
