@@ -26,9 +26,7 @@ main = reportingIOErrors $
 compile :: CompilerConfig -> FilePath -> IO ()
 compile config filepath =
   runCompilerOnProgram (futharkConfig config)
-  ((if defaultToMemoryBlockMerging
-    then gpuPipelineWithMemoryBlockMerging
-    else gpuPipeline) Executable)
+  (gpuPipeline Executable)
   (openclCodeAction filepath config) filepath
 
 openclCodeAction :: FilePath -> CompilerConfig -> Action ExplicitMemory

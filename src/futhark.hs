@@ -290,12 +290,8 @@ commandLineOptions =
     (standardPipeline Library) "s" ["standard"]
   , explicitMemoryPipelineOption "Run the full GPU compilation pipeline"
     (gpuPipeline Library) [] ["gpu"]
-  , explicitMemoryPipelineOption "Run the full GPU compilation pipeline with memory block merging"
-    (gpuPipelineWithMemoryBlockMerging Library) [] ["gpu-mem"]
   , explicitMemoryPipelineOption "Run the sequential CPU compilation pipeline"
     (sequentialPipeline Library) [] ["cpu"]
-  , explicitMemoryPipelineOption "Run the sequential CPU compilation pipeline with memory block merging"
-    (sequentialPipelineWithMemoryBlockMerging Library) [] ["cpu-mem"]
   ]
 
 -- | Entry point.  Non-interactive, except when reading interpreter

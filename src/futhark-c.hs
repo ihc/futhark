@@ -25,9 +25,7 @@ main = reportingIOErrors $
 compile :: CompilerConfig -> FilePath -> IO ()
 compile config filepath =
   runCompilerOnProgram (futharkConfig config)
-  ((if defaultToMemoryBlockMerging
-    then sequentialPipelineWithMemoryBlockMerging
-    else sequentialPipeline) Executable)
+  (sequentialPipeline Executable)
   (cCodeAction filepath config) filepath
 
 cCodeAction :: FilePath -> CompilerConfig -> Action ExplicitMemory
