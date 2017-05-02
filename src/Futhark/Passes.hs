@@ -4,10 +4,7 @@
 module Futhark.Passes
   ( standardPipeline
   , sequentialPipeline
-  , sequentialPipelineWithMemoryBlockMerging
   , gpuPipeline
-  , gpuPipelineWithMemoryBlockMerging
-  , defaultToMemoryBlockMerging
   , CompilationMode (..)
   )
 where
@@ -17,6 +14,10 @@ import Control.Monad.Except
 import Data.Maybe
 
 import Prelude hiding (id)
+
+-- Only used for an experimental feature.
+import System.IO.Unsafe (unsafePerformIO)
+import System.Environment (lookupEnv)
 
 import Futhark.Optimise.CSE
 import Futhark.Optimise.Fusion
@@ -79,8 +80,25 @@ standardPipeline mode =
           | otherwise =
               return ()
 
+-- Experimental!  Enable by setting the environment variable
+-- MEMORY_BLOCK_MERGING to 1.
+usesExperimentalMemoryBlockMerging :: Bool
+usesExperimentalMemoryBlockMerging = unsafePerformIO $ do
+  val <- lookupEnv "MEMORY_BLOCK_MERGING"
+  return $ val == Just "1"
+
+withExperimentalMemoryBlockMerging :: Pipeline SOACS ExplicitMemory
+                       -> Pipeline SOACS ExplicitMemory
+withExperimentalMemoryBlockMerging =
+  (>>> passes [ mergeMemoryBlocks
+              , simplifyExplicitMemory
+              ])
+
 sequentialPipeline :: CompilationMode -> Pipeline SOACS ExplicitMemory
 sequentialPipeline mode =
+  (if usesExperimentalMemoryBlockMerging
+   then withExperimentalMemoryBlockMerging
+   else id) $
   standardPipeline mode >>>
   onePass firstOrderTransform >>>
   passes [ simplifyKernels
@@ -94,15 +112,11 @@ sequentialPipeline mode =
          , simplifyExplicitMemory
          ]
 
-sequentialPipelineWithMemoryBlockMerging :: CompilationMode -> Pipeline SOACS ExplicitMemory
-sequentialPipelineWithMemoryBlockMerging mode =
-  sequentialPipeline mode >>>
-  passes [ mergeMemoryBlocks
-         , simplifyExplicitMemory
-         ]
-
 gpuPipeline :: CompilationMode -> Pipeline SOACS ExplicitMemory
 gpuPipeline mode =
+  (if usesExperimentalMemoryBlockMerging
+   then withExperimentalMemoryBlockMerging
+   else id) $
   standardPipeline mode >>>
   onePass extractKernels >>>
   passes [ simplifyKernels
@@ -124,16 +138,3 @@ gpuPipeline mode =
          , expandAllocations
          , simplifyExplicitMemory
          ]
-
-gpuPipelineWithMemoryBlockMerging :: CompilationMode -> Pipeline SOACS ExplicitMemory
-gpuPipelineWithMemoryBlockMerging mode =
-  gpuPipeline mode >>>
-  passes [ mergeMemoryBlocks
-         , simplifyExplicitMemory
-         ]
-
--- | Flag to determine whether futhark-c and futhark-opencl should default to
--- doing memory block merging.  Useful when using futhark-test and
--- futhark-bench.
-defaultToMemoryBlockMerging :: Bool
-defaultToMemoryBlockMerging = False
