@@ -46,7 +46,7 @@ transformProg prog = do
         -- Print last uses.
         putStrLn $ replicate 10 '*' ++ " Last use result " ++ replicate 10 '*'
         putStrLn $ replicate 70 '-'
-        forM_ (M.assocs lutab_prg) $ \(fun_name, lutab_fun) -> do
+        forM_ (M.assocs lutab_prg) $ \(fun_name, lutab_fun) ->
           forM_ (M.assocs lutab_fun) $ \(stmt_name, lu_names) -> do
             putStrLn $ "Last uses in function " ++ pretty fun_name ++ ", statement " ++ pretty stmt_name ++ ":"
             putStrLn $ L.intercalate "   " $ map pretty $ S.toList lu_names
@@ -61,7 +61,7 @@ transformProg prog = do
           putStrLn $ "Destination memory block: " ++ pretty (DS.dstmem entry)
           -- putStrLn $ "Destination index function: " ++ show (DS.dstind entry)
           putStrLn $ "Aliased destination memory blocks: " ++ L.intercalate "   " (map pretty $ S.toList $ DS.alsmem entry)
-          putStrLn $ "Variables currently using the source memory block:"
+          putStrLn "Variables currently using the source memory block:"
           putStrLn $ L.intercalate "   " $ map pretty (M.keys (DS.vartab entry))
           putStrLn $ replicate 70 '-'
 
