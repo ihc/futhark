@@ -19,7 +19,6 @@ import Futhark.Tools
 import Futhark.Pass
 import Futhark.Representation.AST
 import qualified Futhark.Representation.ExplicitMemory as ExpMem
-import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
 import Futhark.Analysis.Alias (aliasAnalysis)
 
 import qualified Futhark.Pass.MemoryBlockMerging.DataStructs as DataStructs
@@ -97,17 +96,17 @@ transformBody (Body () bnds res) = do
   debug `seq` return body'
 
 transformStm :: Stm ExpMem.ExplicitMemory -> MergeM [Stm ExpMem.ExplicitMemory]
-transformStm (Let (Pattern patCtxElems patValElems) () (DoLoop arginis_ctx arginis lform body)) = do
-  arginis' <- mapM (\(Param x m@(ExpMem.ArrayMem _pt _shape u xmem _xixfun), se) -> do
-                       mem <- (findMem x xmem u)
-                       return (Param x (fromMaybe m mem), se)) arginis
+-- transformStm (Let (Pattern patCtxElems patValElems) () (DoLoop arginis_ctx arginis lform body)) = do
+--   arginis' <- mapM (\(Param x m@(ExpMem.ArrayMem _pt _shape u xmem _xixfun), se) -> do
+--                        mem <- (findMem x xmem u)
+--                        return (Param x (fromMaybe m mem), se)) arginis
 
-  e' <- mapExpM transform (DoLoop arginis_ctx arginis' lform body)
-  patValElems' <- mapM transformPatValElemT patValElems
-  let pat' = Pattern patCtxElems patValElems'
+--   e' <- mapExpM transform (DoLoop arginis_ctx arginis' lform body)
+--   patValElems' <- mapM transformPatValElemT patValElems
+--   let pat' = Pattern patCtxElems patValElems'
 
-  return [Let pat' () e']
-  where transform = identityMapper { mapOnBody = const transformBody }
+--   return [Let pat' () e']
+--   where transform = identityMapper { mapOnBody = const transformBody }
 
 transformStm (Let (Pattern patCtxElems patValElems) () e) = do
   e' <- mapExpM transform e
@@ -124,37 +123,30 @@ transformStm (Let (Pattern patCtxElems patValElems) () e) = do
         -- putStrLn $ replicate 70 '-'
 
   debug `seq` return [Let pat' () e']
-  where transform = identityMapper { mapOnBody = const transformBody }
+  where transform = identityMapper { mapOnBody = const transformBody
+                                   , mapOnFParam = transformFParam
+                                   }
+
+transformFParam :: FParam ExpMem.ExplicitMemory -> MergeM (FParam ExpMem.ExplicitMemory)
+transformFParam (Param x
+                 membound_orig@(ExpMem.ArrayMem _pt _shape u xmem _xixfun)) = do
+  membound <- newMemBound x xmem u
+  return $ Param x $ fromMaybe membound_orig membound
+transformFParam fp = return fp
 
 transformPatValElemT :: PatElemT (LetAttr ExpMem.ExplicitMemory)
-                  -> MergeM (PatElemT (LetAttr ExpMem.ExplicitMemory))
-transformPatValElemT (PatElem x bindage (ExpMem.ArrayMem pt shape u xmem xixfun)) = do
-  coaltab <- ask
-
-  let debug = unsafePerformIO $ do
-        return ()
-        -- print pt
-        -- print shape
-
-  let (xmem', xixfun') = case M.lookup xmem coaltab of
-        Just entry ->
-          let ixfunrebased = IxFun.rebase (DataStructs.dstind entry) xixfun
-          in (DataStructs.dstmem entry, ixfunrebased)
-        Nothing -> (xmem, xixfun)
-
-  debug `seq` return $ PatElem x bindage (ExpMem.ArrayMem pt shape u xmem' xixfun')
-
+                     -> MergeM (PatElemT (LetAttr ExpMem.ExplicitMemory))
+transformPatValElemT (PatElem x bindage
+                      membound_orig@(ExpMem.ArrayMem _pt _shape u xmem _xixfun)) = do
+  membound <- newMemBound x xmem u
+  return $ PatElem x bindage $ fromMaybe membound_orig membound
 transformPatValElemT pe = return pe
 
-
-findMem :: VName -> VName -> u -> MergeM (Maybe (ExpMem.MemBound u))
-findMem x xmem u = do
+newMemBound :: VName -> VName -> u -> MergeM (Maybe (ExpMem.MemBound u))
+newMemBound x xmem u = do
   coaltab <- ask
-
-  case M.lookup xmem coaltab of
-    Just entry ->
-      case M.lookup x $ DataStructs.vartab entry of
-        Just (DataStructs.Coalesced _ (DataStructs.MemBlock pt shape _ xixfun) _) ->
-          return $ Just $ ExpMem.ArrayMem pt shape u (DataStructs.dstmem entry) xixfun
-        Nothing -> return Nothing
-    Nothing -> return Nothing
+  return $ do
+    entry <- M.lookup xmem coaltab
+    DataStructs.Coalesced _ (DataStructs.MemBlock pt shape _ xixfun) _ <-
+      M.lookup x $ DataStructs.vartab entry
+    return $ ExpMem.ArrayMem pt shape u (DataStructs.dstmem entry) xixfun
