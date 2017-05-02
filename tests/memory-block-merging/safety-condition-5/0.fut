@@ -11,6 +11,8 @@
 --           [1, 3]]
 --        }
 
+import "/futlib/array"
+
 let main (xs0: *[#n][#n]i32, ys0: [#n]i32, i: i32): [n][n]i32 =
   let xs = transpose xs0
   let ys = map (+ 10) ys0

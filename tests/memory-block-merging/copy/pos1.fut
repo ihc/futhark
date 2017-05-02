@@ -9,6 +9,8 @@
 --           [0, 1, 2]]
 --        }
 
+import "/futlib/array"
+
 let main (i: i32, ns: [#n]i32): [n][n]i32 =
   let t0 = map (+ 1) ns
   let t1 = replicate n (iota n)
