@@ -6,103 +6,155 @@ module Futhark.Pass.MemoryBlockMerging
 
 import System.IO.Unsafe (unsafePerformIO) -- Just for debugging!
 
-import Control.Applicative
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Arrow
-import Data.List
+import Control.Monad.Reader
+import qualified Data.List as L
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
-import qualified Data.Set      as S
-
-
-import Prelude hiding (div, quot)
+import qualified Data.Set as S
 
 import Futhark.MonadFreshNames
 import Futhark.Tools
 import Futhark.Pass
 import Futhark.Representation.AST
-import Futhark.Representation.ExplicitMemory
-       hiding (Prog, Body, Stm, Pattern, PatElem,
-               BasicOp, Exp, Lambda, ExtLambda, FunDef, FParam, LParam, RetType)
+import qualified Futhark.Representation.ExplicitMemory as ExpMem
+import qualified Futhark.Representation.ExplicitMemory.IndexFunction as IxFun
 import Futhark.Analysis.Alias (aliasAnalysis)
 
 import qualified Futhark.Pass.MemoryBlockMerging.DataStructs as DataStructs
 import qualified Futhark.Pass.MemoryBlockMerging.LastUse as LastUse
 import qualified Futhark.Pass.MemoryBlockMerging.ArrayCoalescing as ArrayCoalescing
-import qualified Futhark.Pass.MemoryBlockMerging.Interference as Interference
+-- import qualified Futhark.Pass.MemoryBlockMerging.Interference as Interference
 
 
-mergeMemoryBlocks :: Pass ExplicitMemory ExplicitMemory
+mergeMemoryBlocks :: Pass ExpMem.ExplicitMemory ExpMem.ExplicitMemory
 mergeMemoryBlocks = simplePass
                     "merge memory blocks"
                     "Transform program to reuse non-interfering memory blocks"
                     transformProg
 
 
-transformProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Prog ExplicitMemory)
+transformProg :: MonadFreshNames m => Prog ExpMem.ExplicitMemory -> m (Prog ExpMem.ExplicitMemory)
 transformProg prog = do
+  let luTabPrg = LastUse.lastUsePrg $ aliasAnalysis prog
+      -- envtab = Interference.intrfAnPrg lutab prog
+      coaltab = ArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
 
   let debug = unsafePerformIO $ do
-        let lutab = LastUse.lastUsePrg $ aliasAnalysis prog
-            envtab = Interference.intrfAnPrg lutab prog
-            coaltab = ArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
-            coal_info = map (\env ->
-                                (DataStructs.dstmem env, DataStructs.dstind env,
-                                 S.toList $ DataStructs.alsmem env, M.toList $ DataStructs.optdeps env,
-                                 map (\(k, DataStructs.Coalesced _ (DataStructs.MemBlock _ _ b indfun) sbst) ->
-                                         (k,(b,indfun,M.toList sbst)))
-                                  $ M.toList $ DataStructs.vartab env)
-                            ) $ M.elems coaltab
+        putStrLn $ replicate 10 '*' ++ " Last use result " ++ replicate 10 '*'
+        putStrLn $ replicate 70 '-'
+        forM_ (M.assocs luTabPrg) $ \(funName, luTabFun) -> do
+          forM_ (M.assocs luTabFun) $ \(stmtName, luNames) -> do
+            putStrLn $ "Last uses in function " ++ pretty funName ++ ", statement " ++ pretty stmtName ++ ":"
+            putStrLn $ L.intercalate "   " $ map pretty $ S.toList luNames
+            putStrLn $ replicate 70 '-'
 
-        putStrLn "Last use result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList) (M.elems lutab))
+        -- putStrLn "Allocations result:"
+        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . Interference.alloc) (M.elems envtab))
 
-        putStrLn "Allocations result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . Interference.alloc) (M.elems envtab))
+        -- putStrLn "Alias result:"
+        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.alias) (M.elems envtab))
 
-        putStrLn "Alias result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.alias) (M.elems envtab))
+        -- putStrLn "Interference result:"
+        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.intrf) (M.elems envtab))
 
-        putStrLn "Interference result:"
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.intrf) (M.elems envtab))
+        replicateM_ 5 $ putStrLn ""
+        putStrLn $ replicate 10 '*' ++ " Coalescings result " ++ "(" ++ show (M.size coaltab) ++ ") " ++ replicate 10 '*'
+        putStrLn $ replicate 70 '-'
+        forM_ (M.assocs coaltab) $ \(xMem, entry) -> do
+          putStrLn $ "Source memory block: " ++ pretty xMem
+          putStrLn $ "Destination memory block: " ++ pretty (DataStructs.dstmem entry)
+          -- putStrLn $ "Destination index function: " ++ show (DataStructs.dstind entry)
+          putStrLn $ "Aliased destination memory blocks: " ++ L.intercalate "   " (map pretty $ S.toList $ DataStructs.alsmem entry)
+          putStrLn $ "Variables currently using the source memory block:"
+          putStrLn $ L.intercalate "   " $ map pretty (M.keys (DataStructs.vartab entry))
+          putStrLn $ replicate 70 '-'
 
-        putStrLn $ "Coalescing result: " ++ pretty (length coaltab)
-        putStrLn $ unlines (map ("  "++) $ lines $ pretty coal_info)
+  debug `seq` intraproceduralTransformation (transformFunDef coaltab) prog
 
-  debug `seq` intraproceduralTransformation transformFunDef prog
-
-transformFunDef :: MonadFreshNames m => FunDef ExplicitMemory -> m (FunDef ExplicitMemory)
-transformFunDef fundef = do
-  body' <- modifyNameSource $ runState m
+transformFunDef :: MonadFreshNames m
+                => DataStructs.CoalsTab
+                -> FunDef ExpMem.ExplicitMemory
+                -> m (FunDef ExpMem.ExplicitMemory)
+transformFunDef coaltab fundef = do
+  body' <- modifyNameSource $ runState $ runReaderT m coaltab
   return fundef { funDefBody = body' }
   where m = transformBody $ funDefBody fundef
 
-type MergeM = State VNameSource
+type MergeM = ReaderT DataStructs.CoalsTab (State VNameSource)
 
-transformBody :: Body ExplicitMemory -> MergeM (Body ExplicitMemory)
+transformBody :: Body ExpMem.ExplicitMemory -> MergeM (Body ExpMem.ExplicitMemory)
 transformBody (Body () bnds res) = do
   bnds' <- concat <$> mapM transformStm bnds
-  return $ Body () bnds' res
-
-transformStm :: Stm ExplicitMemory -> MergeM [Stm ExplicitMemory]
-transformStm (Let pat () e) = do
-  (bnds, e') <- transformExp pat =<< mapExpM transform e
-  return $ bnds ++ [Let pat () e']
-  where transform = identityMapper { mapOnBody = const transformBody
-                                   }
-
-transformExp :: Pattern ExplicitMemory -> Exp ExplicitMemory
-             -> MergeM ([Stm ExplicitMemory], Exp ExplicitMemory)
-transformExp pat (Op (Alloc se sp)) = do
-  let se' = se
+  let body' = Body () bnds' res
 
   let debug = unsafePerformIO $ do
-        print pat
-        print se
-        print sp
-        putStrLn "-----"
+        return ()
+        -- putStrLn $ pretty body'
+        -- putStrLn $ replicate 70 '-'
 
-  debug `seq` return ([], Op (Alloc se' sp))
+  debug `seq` return body'
 
-transformExp _ e =
-  return ([], e)
+transformStm :: Stm ExpMem.ExplicitMemory -> MergeM [Stm ExpMem.ExplicitMemory]
+transformStm (Let (Pattern patCtxElems patValElems) () (DoLoop arginis_ctx arginis lform body)) = do
+  arginis' <- mapM (\(Param x m@(ExpMem.ArrayMem _pt _shape u xmem _xixfun), se) -> do
+                       mem <- (findMem x xmem u)
+                       return (Param x (fromMaybe m mem), se)) arginis
+
+  e' <- mapExpM transform (DoLoop arginis_ctx arginis' lform body)
+  patValElems' <- mapM transformPatValElemT patValElems
+  let pat' = Pattern patCtxElems patValElems'
+
+  return [Let pat' () e']
+  where transform = identityMapper { mapOnBody = const transformBody }
+
+transformStm (Let (Pattern patCtxElems patValElems) () e) = do
+  e' <- mapExpM transform e
+  -- patCtxElems' <- mapM transformPatCtxElemT patCtxElems
+  patValElems' <- mapM transformPatValElemT patValElems
+  let pat' = Pattern patCtxElems patValElems'
+
+  let debug = unsafePerformIO $ do
+        return ()
+        -- print e'
+        -- print pat'
+        -- print pat
+        -- print pat'
+        -- putStrLn $ replicate 70 '-'
+
+  debug `seq` return [Let pat' () e']
+  where transform = identityMapper { mapOnBody = const transformBody }
+
+transformPatValElemT :: PatElemT (LetAttr ExpMem.ExplicitMemory)
+                  -> MergeM (PatElemT (LetAttr ExpMem.ExplicitMemory))
+transformPatValElemT (PatElem x bindage (ExpMem.ArrayMem pt shape u xmem xixfun)) = do
+  coaltab <- ask
+
+  let debug = unsafePerformIO $ do
+        return ()
+        -- print pt
+        -- print shape
+
+  let (xmem', xixfun') = case M.lookup xmem coaltab of
+        Just entry ->
+          let ixfunrebased = IxFun.rebase (DataStructs.dstind entry) xixfun
+          in (DataStructs.dstmem entry, ixfunrebased)
+        Nothing -> (xmem, xixfun)
+
+  debug `seq` return $ PatElem x bindage (ExpMem.ArrayMem pt shape u xmem' xixfun')
+
+transformPatValElemT pe = return pe
+
+
+findMem :: VName -> VName -> u -> MergeM (Maybe (ExpMem.MemBound u))
+findMem x xmem u = do
+  coaltab <- ask
+
+  case M.lookup xmem coaltab of
+    Just entry ->
+      case M.lookup x $ DataStructs.vartab entry of
+        Just (DataStructs.Coalesced _ (DataStructs.MemBlock pt shape _ xixfun) _) ->
+          return $ Just $ ExpMem.ArrayMem pt shape u (DataStructs.dstmem entry) xixfun
+        Nothing -> return Nothing
+    Nothing -> return Nothing
