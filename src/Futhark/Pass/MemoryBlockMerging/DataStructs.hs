@@ -12,7 +12,7 @@ module Futhark.Pass.MemoryBlockMerging.DataStructs
 import Prelude
 import Data.Maybe
 import qualified Data.Map.Strict as M
-import qualified Data.Set      as S
+import qualified Data.Set as S
 
 --import Debug.Trace
 

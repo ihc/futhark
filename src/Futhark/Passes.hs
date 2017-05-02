@@ -82,23 +82,29 @@ standardPipeline mode =
 
 -- Experimental!  Enable by setting the environment variable
 -- MEMORY_BLOCK_MERGING to 1.
+{-# NOINLINE usesExperimentalMemoryBlockMerging #-}
 usesExperimentalMemoryBlockMerging :: Bool
 usesExperimentalMemoryBlockMerging = unsafePerformIO $ do
   val <- lookupEnv "MEMORY_BLOCK_MERGING"
   return $ val == Just "1"
 
 withExperimentalMemoryBlockMerging :: Pipeline SOACS ExplicitMemory
-                       -> Pipeline SOACS ExplicitMemory
+                                   -> Pipeline SOACS ExplicitMemory
 withExperimentalMemoryBlockMerging =
   (>>> passes [ mergeMemoryBlocks
               , simplifyExplicitMemory
               ])
 
+withExperimentalPasses :: Pipeline SOACS ExplicitMemory
+                       -> Pipeline SOACS ExplicitMemory
+withExperimentalPasses pipeline =
+  if usesExperimentalMemoryBlockMerging
+  then withExperimentalMemoryBlockMerging pipeline
+  else pipeline
+
 sequentialPipeline :: CompilationMode -> Pipeline SOACS ExplicitMemory
 sequentialPipeline mode =
-  (if usesExperimentalMemoryBlockMerging
-   then withExperimentalMemoryBlockMerging
-   else id) $
+  withExperimentalPasses $
   standardPipeline mode >>>
   onePass firstOrderTransform >>>
   passes [ simplifyKernels
@@ -114,9 +120,7 @@ sequentialPipeline mode =
 
 gpuPipeline :: CompilationMode -> Pipeline SOACS ExplicitMemory
 gpuPipeline mode =
-  (if usesExperimentalMemoryBlockMerging
-   then withExperimentalMemoryBlockMerging
-   else id) $
+  withExperimentalPasses $
   standardPipeline mode >>>
   onePass extractKernels >>>
   passes [ simplifyKernels

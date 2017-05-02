@@ -7,7 +7,7 @@ module Futhark.Pass.MemoryBlockMerging.LastUse
 
 import Prelude
 import qualified Data.Map.Strict as M
-import qualified Data.Set      as S
+import qualified Data.Set as S
 
 --import Debug.Trace
 

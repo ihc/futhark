@@ -10,7 +10,7 @@ import Data.Monoid
 import Data.List
 import Control.Arrow
 import qualified Data.Map.Strict as M
-import qualified Data.Set      as S
+import qualified Data.Set as S
 import qualified Control.Exception.Base as Exc
 import Debug.Trace
 
