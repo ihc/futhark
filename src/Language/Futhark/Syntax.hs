@@ -554,9 +554,6 @@ data ExpBase f vn =
 
             | Update (ExpBase f vn) [DimIndexBase f vn] (ExpBase f vn) SrcLoc
 
-            | Shape (ExpBase f vn) SrcLoc
-            -- ^ The shape of the argument.
-
             | Split Int (ExpBase f vn) (ExpBase f vn) SrcLoc
             -- ^ @split@0( (1,1,3), [ 1, 2, 3, 4 ]) = {[1], [], [2,
             -- 3], [4]}@.  Note that this is different from in the
@@ -568,10 +565,6 @@ data ExpBase f vn =
             -- static integer indicates which dimension to concatenate
             -- across.
 
-            | Copy (ExpBase f vn) SrcLoc
-            -- ^ Copy the value return by the expression.  This only
-            -- makes a difference in do-loops with merge variables.
-
             -- Array construction.
             | Iota (ExpBase f vn) SrcLoc
             -- ^ @iota(n) = [0,1,..,n-1]@
@@ -581,10 +574,6 @@ data ExpBase f vn =
             -- Array index space transformation.
             | Reshape (ExpBase f vn) (ExpBase f vn) SrcLoc
              -- ^ 1st arg is the new shape, 2nd arg is the input array.
-
-            | Transpose (ExpBase f vn) SrcLoc
-            -- ^ Transpose two-dimensional array.  @transpose(a) =
-            -- rearrange((1,0), a)@.
 
             | Rearrange [Int] (ExpBase f vn) SrcLoc
             -- ^ Permute the dimensions of the input array.  The list
@@ -647,9 +636,6 @@ data ExpBase f vn =
             -- may choose the maximal chunk size that still satisfies the memory
             -- requirements of the device.
 
-            | Scatter (ExpBase f vn) (ExpBase f vn) (ExpBase f vn) SrcLoc
-            -- ^ @write [3, 4, 5] [0, 2, -1] [9, 7, 0] = [9, 4, 7]@.
-
             | Zip Int (ExpBase f vn) [ExpBase f vn] SrcLoc
             -- ^ Conventional zip taking nonzero arrays as arguments.
             -- All arrays must have the exact same length.
@@ -690,10 +676,8 @@ instance Located (ExpBase f vn) where
   locOf (Index _ _ pos)          = locOf pos
   locOf (Update _ _ _ pos)       = locOf pos
   locOf (Iota _ pos)             = locOf pos
-  locOf (Shape _ pos)            = locOf pos
   locOf (Replicate _ _ pos)      = locOf pos
   locOf (Reshape _ _ pos)        = locOf pos
-  locOf (Transpose _ pos)        = locOf pos
   locOf (Rearrange _ _ pos)      = locOf pos
   locOf (Rotate _ _ _ pos)       = locOf pos
   locOf (Map _ _ pos)            = locOf pos
@@ -705,11 +689,9 @@ instance Located (ExpBase f vn) where
   locOf (Partition _ _ pos)      = locOf pos
   locOf (Split _ _ _ pos)        = locOf pos
   locOf (Concat _ _ _ pos)       = locOf pos
-  locOf (Copy _ pos)             = locOf pos
   locOf (DoLoop _ _ _ _ _ _ pos) = locOf pos
   locOf (Stream _ _ _  pos)      = locOf pos
   locOf (Unsafe _ loc)           = locOf loc
-  locOf (Scatter _ _ _ loc)      = locOf loc
 
 -- | An entry in a record literal.
 data FieldBase f vn = RecordField Name (ExpBase f vn) SrcLoc
@@ -932,6 +914,7 @@ data DecBase f vn = ValDec (ValBindBase f vn)
                   | SigDec (SigBindBase f vn)
                   | ModDec (ModBindBase f vn)
                   | OpenDec (ModExpBase f vn) [ModExpBase f vn] (f [VName]) SrcLoc
+                  | LocalDec (DecBase f vn) SrcLoc
 deriving instance Showable f vn => Show (DecBase f vn)
 
 instance Located (DecBase f vn) where
@@ -941,6 +924,7 @@ instance Located (DecBase f vn) where
   locOf (SigDec d)          = locOf d
   locOf (ModDec d)          = locOf d
   locOf (OpenDec _ _ _ loc) = locOf loc
+  locOf (LocalDec _ loc)    = locOf loc
 
 newtype ProgBase f vn = Prog { progDecs :: [DecBase f vn] }
 deriving instance Showable f vn => Show (ProgBase f vn)

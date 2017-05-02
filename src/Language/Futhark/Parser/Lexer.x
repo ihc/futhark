@@ -118,11 +118,9 @@ keyword s =
     "with"         -> WITH
 
     "iota"         -> IOTA
-    "shape"        -> SHAPE
     "replicate"    -> REPLICATE
     "reshape"      -> RESHAPE
     "rearrange"    -> REARRANGE
-    "transpose"    -> TRANSPOSE
     "rotate"       -> ROTATE
     "map"          -> MAP
     "reduce"       -> REDUCE
@@ -136,20 +134,19 @@ keyword s =
     "filter"       -> FILTER
     "partition"    -> PARTITION
     "empty"        -> EMPTY
-    "copy"         -> COPY
     "while"        -> WHILE
     "stream_map"     -> STREAM_MAP
     "stream_map_per" -> STREAM_MAPPER
     "stream_red"     -> STREAM_RED
     "stream_red_per" -> STREAM_REDPER
     "stream_seq"     -> STREAM_SEQ
-    "scatter"      -> SCATTER
     "include"      -> INCLUDE
     "import"       -> IMPORT
     "type"         -> TYPE
     "entry"        -> ENTRY
     "module"       -> MODULE
     "open"         -> OPEN
+    "local"        -> LOCAL
     _              -> ID $ nameFromText s
 
 indexing :: T.Text -> Alex Name
@@ -311,7 +308,6 @@ data Token = ID Name
            | FOR
            | DO
            | WITH
-           | SHAPE
            | IOTA
            | REPLICATE
            | MAP
@@ -319,7 +315,6 @@ data Token = ID Name
            | REDUCECOMM
            | RESHAPE
            | REARRANGE
-           | TRANSPOSE
            | ROTATE
            | ZIP
            | UNZIP
@@ -332,14 +327,12 @@ data Token = ID Name
            | TRUE
            | FALSE
            | EMPTY
-           | COPY
            | WHILE
            | STREAM_MAP
            | STREAM_MAPPER
            | STREAM_RED
            | STREAM_REDPER
            | STREAM_SEQ
-           | SCATTER
            | INCLUDE
            | IMPORT
            | ENTRY
@@ -347,6 +340,7 @@ data Token = ID Name
            | MODULE
            | VAL
            | OPEN
+           | LOCAL
 
            | EOF
 

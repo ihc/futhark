@@ -176,18 +176,15 @@ literals and variables, but also more complicated forms.
       : | "let" `id` `type_param`* `pat`+ [":" `type`] "=" `exp` "in" `exp`
       : | "loop" "(" `type_param`* `pat` [("=" `exp`)] ")" "=" `loopform` "do" `exp` in `exp`
       : | "iota" `exp`
-      : | "shape" `exp`
       : | "replicate" `exp` `exp`
       : | "reshape" `exp` `exp`
       : | "rearrange" "(" `nat_int`+ ")" `exp`
-      : | "transpose" `exp`
       : | "rotate" ["@" `nat_int`] `exp` `exp`
       : | "split" ["@" `nat_int`] `exp` `exp`
       : | "concat" ["@" `nat_int`] `exp`+
       : | "zip" ["@" `nat_int`] `exp`+
       : | "unzip" `exp`
       : | "unsafe" `exp`
-      : | "copy" `exp`
       : | `exp` "with" "[" `index` ("," `index`)* "]" "<-" `exp`
       : | "map" `fun` `exp`+
       : | "reduce" `fun` `exp` `exp`
@@ -196,7 +193,6 @@ literals and variables, but also more complicated forms.
       : | "scan" `fun` `exp` `exp`
       : | "filter" `fun` `exp`
       : | "partition" "(" `fun`+ ")" `exp`
-      : | "scatter" `exp` `exp` `exp`
       : | "stream_map" `fun` `exp`
       : | "stream_map_per" `fun` `exp`
       : | "stream_red" `fun` `exp` `exp`
@@ -561,11 +557,6 @@ length-``n`` permutation.
 For example, if ``b==rearrange (2,0,1) a``, then ``b[x,y,z] =
 a[y,z,x]``.
 
-``transpose a``
-................
-
-Return the transpose of ``a``, which must be a two-dimensional array.
-
 ``rotate@d i a``
 ................
 
@@ -638,12 +629,6 @@ with ``e``.  This is useful if the compiler is otherwise unable to
 avoid bounds checks (e.g. when using indirect indexes), but you really
 do not want them here.
 
-``copy a``
-...........
-Return a deep copy of the argument.  Semantically, this is just
-the identity function, but it has special semantics related to
-uniqueness types as described in :ref:`uniqueness-types`.
-
 ``a with [i] <- e``
 ...................
 
@@ -703,7 +688,7 @@ elements of the partitions retain their original relative positions.
 ``scatter as is vs``
 ....................
 
-The ``scatter`` expression calculates the equivalent of this imperative
+This ``scatter`` expression calculates the equivalent of this imperative
 code::
 
   for index in 0..shape(is)[0]-1:
@@ -1052,7 +1037,9 @@ You can also include files from subdirectories::
 
   include "path/to/a/file"
 
-The above will include the file ``path/to/a/file.fut``.
+The above will include the file ``path/to/a/file.fut``.  When
+importing a nonlocal file (such as the standard library or the
+compiler search path), the path must begin with a forward slash.
 
 Qualified imports are also possible, where a module is created for the
 file::

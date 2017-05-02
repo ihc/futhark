@@ -146,14 +146,12 @@ import Language.Futhark.Parser.Lexer
       do              { L $$ DO }
       with            { L $$ WITH }
       iota            { L $$ IOTA }
-      shape           { L $$ SHAPE }
       replicate       { L $$ REPLICATE }
       map             { L $$ MAP }
       reduce          { L $$ REDUCE }
       reduceComm      { L $$ REDUCECOMM }
       reshape         { L $$ RESHAPE }
       rearrange       { L $$ REARRANGE }
-      transpose       { L $$ TRANSPOSE }
       rotate          { L $$ ROTATE }
       zip             { L $$ ZIP }
       unzip           { L $$ UNZIP }
@@ -166,7 +164,6 @@ import Language.Futhark.Parser.Lexer
       true            { L $$ TRUE }
       false           { L $$ FALSE }
       empty           { L $$ EMPTY }
-      copy            { L $$ COPY }
       while           { L $$ WHILE }
       stream_map      { L $$ STREAM_MAP }
       stream_map_per  { L $$ STREAM_MAPPER }
@@ -175,11 +172,11 @@ import Language.Futhark.Parser.Lexer
       stream_seq      { L $$ STREAM_SEQ }
       include         { L $$ INCLUDE }
       import          { L $$ IMPORT }
-      scatter         { L $$ SCATTER }
       type            { L $$ TYPE }
       module          { L $$ MODULE }
       val             { L $$ VAL }
       open            { L $$ OPEN }
+      local           { L $$ LOCAL }
 
 %left bottom
 %left ifprec letprec
@@ -202,7 +199,7 @@ nonassoc with
 %nonassoc '['
 %nonassoc Id
 %left juxtprec
-%left indexprec iota shape copy transpose rotate rearrange split shape reduce map scan filter partition stream_red stream_red_per stream_map stream_map_per streamSeq
+%left indexprec iota copy rotate rearrange split shape reduce map scan filter partition stream_red stream_red_per stream_map stream_map_per streamSeq
 %%
 
 -- Some parameterized productions.  Left-recursive, as this is faster
@@ -241,9 +238,10 @@ Dec :: { [UncheckedDec] }
     | ModBind           { [ModDec $1 ] }
     | DefaultDec        { [] }
     | import stringlit
-      { let L loc (STRINGLIT s) = $2 in [OpenDec (ModImport s loc) [] NoInfo $1] }
+      { let L loc (STRINGLIT s) = $2 in [LocalDec (OpenDec (ModImport s loc) [] NoInfo $1) $1] }
     | open many1(ModExpAtom)
       { [OpenDec (fst $2) (snd $2) NoInfo $1] }
+    | local Dec         { map (`LocalDec` $1) $2 }
 ;
 
 SigExp :: { UncheckedSigExp }
@@ -481,8 +479,6 @@ Exp2 :: { UncheckedExp }
 
      | iota Atom { Iota $2 $1 }
 
-     | shape Atom { Shape $2 $1 }
-
      | replicate Atom Atom { Replicate $2 $3 $1 }
 
      | reshape Atom Atom
@@ -490,9 +486,6 @@ Exp2 :: { UncheckedExp }
 
      | rearrange '(' NaturalInts ')' Atom
                       { Rearrange $3 $5 $1 }
-
-     | transpose Atom
-                      { Transpose $2 $1 }
 
      | rotate '@' NaturalInt Atom Atom { Rotate $3 $4 $5 $1 }
 
@@ -541,8 +534,6 @@ Exp2 :: { UncheckedExp }
      | partition '(' sepBy1(FunAbstr, ',') ')' Atom
                       { Partition (fst $3 : snd $3) $5 $1 }
 
-     | copy Atom   { Copy $2 $1 }
-
      | stream_map       FunAbstr Atom
                          { Stream (MapLike InOrder)  $2 $3 $1 }
      | stream_map_per    FunAbstr Atom
@@ -553,8 +544,6 @@ Exp2 :: { UncheckedExp }
                          { Stream (RedLike Disorder Commutative $2) $3 $4 $1 }
      | stream_seq       FunAbstr Atom Atom
                          { Stream (Sequential $3) $2 $4 $1 }
-     | scatter Atom Atom Atom
-                         { Scatter $2 $3 $4 $1 }
 
      | Exp2 '+...' Exp2    { binOp $1 $2 $3 }
      | Exp2 '-...' Exp2    { binOp $1 $2 $3 }

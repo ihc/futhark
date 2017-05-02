@@ -208,16 +208,12 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
   pprPrec _ (Index e idxs _) =
     pprPrec 9 e <> brackets (commasep (map ppr idxs))
   pprPrec _ (Iota e _) = text "iota" <+> pprPrec 10 e
-  pprPrec _ (Shape e _) =
-    text "shape" <+> pprPrec 10 e
   pprPrec _ (Replicate ne ve _) =
     text "replicate" <+> spread [pprPrec 10 ne, pprPrec 10 ve]
   pprPrec _ (Reshape shape e _) =
     text "reshape" <+> ppr shape <+> ppr e
   pprPrec _ (Rearrange perm e _) =
     text "rearrange" <> apply [apply (map ppr perm), ppr e]
-  pprPrec _ (Transpose e _) =
-    text "transpose" <> apply [ppr e]
   pprPrec _ (Rotate d x e _) =
     text "rotate@" <> ppr d <> apply [ppr x, ppr e]
   pprPrec _ (Map lam as _) = ppSOAC "map" [lam] as
@@ -249,7 +245,6 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
     text "split@" <> ppr i <+> pprPrec 10 e <+> pprPrec 10 a
   pprPrec _ (Concat i x y _) =
     text "concat" <> text "@" <> ppr i <+> pprPrec 10 x <+> pprPrec 10 y
-  pprPrec _ (Copy e _) = text "copy" <> pprPrec 10 e
   pprPrec _ (DoLoop tparams pat initexp form loopbody letbody _) =
     text "loop" <+> parens (spread (map ppr tparams ++ [ppr pat]) <+> equals
                             <+> ppr initexp) <+> equals <+>
@@ -257,7 +252,6 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ExpBase ty vn) where
     text "do" </>
     indent 2 (ppr loopbody) <+> text "in" </>
     ppr letbody
-  pprPrec _ (Scatter i v a _) = text "scatter" <> spread [pprPrec 10 i, pprPrec 10 v, pprPrec 10 a]
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (FieldBase ty vn) where
   ppr (RecordField name e _) = ppr name <> equals <> ppr e
@@ -313,6 +307,7 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (DecBase ty vn) where
   ppr (SigDec sig)       = ppr sig
   ppr (ModDec sd)        = ppr sd
   ppr (OpenDec x xs _ _) = text "open" <+> spread (map ppr (x:xs))
+  ppr (LocalDec dec _)   = text "local" <+> ppr dec
 
 instance (Eq vn, Hashable vn, Pretty vn) => Pretty (ModExpBase ty vn) where
   ppr (ModVar v _) = ppr v

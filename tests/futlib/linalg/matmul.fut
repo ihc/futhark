@@ -7,7 +7,8 @@
 --    [  [ 19 , 22  ] ,  [ 43 , 50  ]  ]
 -- }
 
-import "futlib/linalg"
+import "/futlib/math"
+import "/futlib/linalg"
 
 module i32linalg = linalg(i32)
 
