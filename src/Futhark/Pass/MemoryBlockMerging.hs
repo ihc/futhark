@@ -42,8 +42,9 @@ transformProg prog = do
       -- envtab = Interference.intrfAnPrg lutab prog
       coaltab = ArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
 
-  let debug = unsafePerformIO $ do
+  let debug = coaltab `seq` unsafePerformIO $ do
         -- Print last uses.
+        replicateM_ 5 $ putStrLn ""
         putStrLn $ replicate 10 '*' ++ " Last use result " ++ replicate 10 '*'
         putStrLn $ replicate 70 '-'
         forM_ (M.assocs lutab_prg) $ \(fun_name, lutab_fun) ->
