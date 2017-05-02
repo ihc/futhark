@@ -34,35 +34,30 @@ mergeMemoryBlocks = simplePass
                     transformProg
 
 
-transformProg :: MonadFreshNames m => Prog ExpMem.ExplicitMemory -> m (Prog ExpMem.ExplicitMemory)
+transformProg :: MonadFreshNames m
+              => Prog ExpMem.ExplicitMemory
+              -> m (Prog ExpMem.ExplicitMemory)
 transformProg prog = do
-  let luTabPrg = LastUse.lastUsePrg $ aliasAnalysis prog
+  let lutab_prg = LastUse.lastUsePrg $ aliasAnalysis prog
       -- envtab = Interference.intrfAnPrg lutab prog
       coaltab = ArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
 
   let debug = unsafePerformIO $ do
+        -- Print last uses.
         putStrLn $ replicate 10 '*' ++ " Last use result " ++ replicate 10 '*'
         putStrLn $ replicate 70 '-'
-        forM_ (M.assocs luTabPrg) $ \(funName, luTabFun) -> do
-          forM_ (M.assocs luTabFun) $ \(stmtName, luNames) -> do
-            putStrLn $ "Last uses in function " ++ pretty funName ++ ", statement " ++ pretty stmtName ++ ":"
-            putStrLn $ L.intercalate "   " $ map pretty $ S.toList luNames
+        forM_ (M.assocs lutab_prg) $ \(fun_name, lutab_fun) -> do
+          forM_ (M.assocs lutab_fun) $ \(stmt_name, lu_names) -> do
+            putStrLn $ "Last uses in function " ++ pretty fun_name ++ ", statement " ++ pretty stmt_name ++ ":"
+            putStrLn $ L.intercalate "   " $ map pretty $ S.toList lu_names
             putStrLn $ replicate 70 '-'
 
-        -- putStrLn "Allocations result:"
-        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (S.toList . Interference.alloc) (M.elems envtab))
-
-        -- putStrLn "Alias result:"
-        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.alias) (M.elems envtab))
-
-        -- putStrLn "Interference result:"
-        -- putStrLn $ unlines (map ("  "++) $ lines $ pretty $ concatMap (map (Control.Arrow.second S.toList) . M.toList . Interference.intrf) (M.elems envtab))
-
+        -- Print coalescings.
         replicateM_ 5 $ putStrLn ""
         putStrLn $ replicate 10 '*' ++ " Coalescings result " ++ "(" ++ show (M.size coaltab) ++ ") " ++ replicate 10 '*'
         putStrLn $ replicate 70 '-'
-        forM_ (M.assocs coaltab) $ \(xMem, entry) -> do
-          putStrLn $ "Source memory block: " ++ pretty xMem
+        forM_ (M.assocs coaltab) $ \(xmem, entry) -> do
+          putStrLn $ "Source memory block: " ++ pretty xmem
           putStrLn $ "Destination memory block: " ++ pretty (DataStructs.dstmem entry)
           -- putStrLn $ "Destination index function: " ++ show (DataStructs.dstind entry)
           putStrLn $ "Aliased destination memory blocks: " ++ L.intercalate "   " (map pretty $ S.toList $ DataStructs.alsmem entry)
@@ -86,43 +81,15 @@ type MergeM = ReaderT DataStructs.CoalsTab (State VNameSource)
 transformBody :: Body ExpMem.ExplicitMemory -> MergeM (Body ExpMem.ExplicitMemory)
 transformBody (Body () bnds res) = do
   bnds' <- concat <$> mapM transformStm bnds
-  let body' = Body () bnds' res
-
-  let debug = unsafePerformIO $ do
-        return ()
-        -- putStrLn $ pretty body'
-        -- putStrLn $ replicate 70 '-'
-
-  debug `seq` return body'
+  return $ Body () bnds' res
 
 transformStm :: Stm ExpMem.ExplicitMemory -> MergeM [Stm ExpMem.ExplicitMemory]
--- transformStm (Let (Pattern patCtxElems patValElems) () (DoLoop arginis_ctx arginis lform body)) = do
---   arginis' <- mapM (\(Param x m@(ExpMem.ArrayMem _pt _shape u xmem _xixfun), se) -> do
---                        mem <- (findMem x xmem u)
---                        return (Param x (fromMaybe m mem), se)) arginis
-
---   e' <- mapExpM transform (DoLoop arginis_ctx arginis' lform body)
---   patValElems' <- mapM transformPatValElemT patValElems
---   let pat' = Pattern patCtxElems patValElems'
-
---   return [Let pat' () e']
---   where transform = identityMapper { mapOnBody = const transformBody }
-
 transformStm (Let (Pattern patCtxElems patValElems) () e) = do
   e' <- mapExpM transform e
   -- patCtxElems' <- mapM transformPatCtxElemT patCtxElems
   patValElems' <- mapM transformPatValElemT patValElems
   let pat' = Pattern patCtxElems patValElems'
-
-  let debug = unsafePerformIO $ do
-        return ()
-        -- print e'
-        -- print pat'
-        -- print pat
-        -- print pat'
-        -- putStrLn $ replicate 70 '-'
-
-  debug `seq` return [Let pat' () e']
+  return [Let pat' () e']
   where transform = identityMapper { mapOnBody = const transformBody
                                    , mapOnFParam = transformFParam
                                    }
