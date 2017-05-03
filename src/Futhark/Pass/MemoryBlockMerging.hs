@@ -42,7 +42,11 @@ transformProg prog = do
       -- envtab = Interference.intrfAnPrg lutab prog
       coaltab = ArrayCoalescing.mkCoalsTab $ aliasAnalysis prog
 
+  prog' <- intraproceduralTransformation (transformFunDef coaltab) prog
+
   let debug = coaltab `seq` unsafePerformIO $ do
+        putStrLn $ pretty prog'
+
         -- Print last uses.
         replicateM_ 5 $ putStrLn ""
         putStrLn $ replicate 10 '*' ++ " Last use result " ++ replicate 10 '*'
@@ -66,7 +70,7 @@ transformProg prog = do
           putStrLn $ L.intercalate "   " $ map pretty (M.keys (DS.vartab entry))
           putStrLn $ replicate 70 '-'
 
-  debug `seq` intraproceduralTransformation (transformFunDef coaltab) prog
+  debug `seq` return prog'
 
 transformFunDef :: MonadFreshNames m
                 => DS.CoalsTab
@@ -87,9 +91,14 @@ transformBody (Body () bnds res) = do
 transformStm :: Stm ExpMem.ExplicitMemory -> MergeM [Stm ExpMem.ExplicitMemory]
 transformStm (Let (Pattern patCtxElems patValElems) () e) = do
   e' <- mapExpM transform e
-  -- patCtxElems' <- mapM transformPatCtxElemT patCtxElems
+
+  -- FIXME: Remove any context pattern elements not in use anymore.  It should
+  -- not be necessary to add new ones, since we only reuse memory, not introduce
+  -- new memory.  Seek inspiration in ExpMem.matchPatternToReturns.
+  let patCtxElems' = patCtxElems
+
   patValElems' <- mapM transformPatValElemT patValElems
-  let pat' = Pattern patCtxElems patValElems'
+  let pat' = Pattern patCtxElems' patValElems'
   return [Let pat' () e']
   where transform = identityMapper { mapOnBody = const transformBody
                                    , mapOnFParam = transformFParam
