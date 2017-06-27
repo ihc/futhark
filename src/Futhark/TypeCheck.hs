@@ -825,15 +825,28 @@ checkExp (DoLoop ctxmerge valmerge form loopbody) = do
       (mergepat, mergeexps) = unzip merge
   mergeargs <- mapM checkArg mergeexps
 
-  funparams <- case form of
-    ForLoop loopvar it boundexp -> do
+  case form of
+    ForLoop loopvar it boundexp loopvars -> do
       iparam <- primFParam loopvar $ IntType it
       let funparams = iparam : mergepat
           paramts   = map paramDeclType funparams
 
+      forM_ loopvars $ \(p,a) -> do
+        a_t <- lookupType a
+        observe a
+        case peelArray 1 a_t of
+          Just a_t_r -> do
+            checkLParamLore (paramName p) $ paramAttr p
+            unless (a_t_r `subtypeOf` typeOf (paramAttr p)) $
+               bad $ TypeError $ "Loop parameter " ++ pretty p ++
+               " not valid for element of " ++ pretty a ++ ", which has row type " ++ pretty a_t_r
+            return ()
+          _ -> bad $ TypeError $ "Cannot loop over " ++ pretty a ++
+               " of type " ++ pretty a_t
+
       boundarg <- checkArg boundexp
       checkFuncall Nothing paramts $ boundarg : mergeargs
-      return funparams
+
     WhileLoop cond -> do
       case find ((==cond) . paramName . fst) merge of
         Just (condparam,_) ->
@@ -847,7 +860,6 @@ checkExp (DoLoop ctxmerge valmerge form loopbody) = do
       let funparams = mergepat
           paramts   = map paramDeclType funparams
       checkFuncall Nothing paramts mergeargs
-      return funparams
 
   let rettype = map paramDeclType mergepat
       consumable = [ (paramName param, mempty)
@@ -858,10 +870,10 @@ checkExp (DoLoop ctxmerge valmerge form loopbody) = do
   context "Inside the loop body" $
     checkFun' (nameFromString "<loop body>",
                staticShapes rettype,
-               funParamsToNameInfos funparams,
+               funParamsToNameInfos mergepat,
                loopbody) consumable $ do
-        checkFunParams funparams
-        checkBody loopbody
+        checkFunParams mergepat
+        binding (scopeOfLoopForm form) $ checkBody loopbody
         bodyt <- map (`toDecl` Unique) <$> bodyExtType loopbody
         unless (map rankShaped bodyt `subtypesOf`
                 map rankShaped (staticShapes rettype)) $

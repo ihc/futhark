@@ -534,9 +534,16 @@ defCompileExp (Destination dest) (DoLoop ctx val form body) =
         copyDWIM (paramName p) [] se []
     (bindForm, emitForm) <-
       case form of
-        ForLoop i it bound -> do
+        ForLoop i it bound loopvars -> do
           bound' <- compileSubExp bound
-          return (declaringLoopVar i it, emit . Imp.For i it bound')
+          let setLoopParam (p,a)
+                | Prim _ <- paramType p =
+                    copyDWIM (paramName p) [] (Var a) [varIndex i]
+                | otherwise =
+                    return ()
+          set_loop_params <- collect $ mapM_ setLoopParam loopvars
+          return (declaringLParams (map fst loopvars) . declaringLoopVar i it,
+                  emit . Imp.For i it bound' . (set_loop_params<>))
         WhileLoop cond ->
           return (id, emit . Imp.While (Imp.var cond Bool))
 

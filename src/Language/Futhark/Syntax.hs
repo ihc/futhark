@@ -734,6 +734,7 @@ instance Located (FieldBase f vn) where
 
 -- | Whether the loop is a @for@-loop or a @while@-loop.
 data LoopFormBase f vn = For ForLoopDirection (LowerBoundBase f vn) (IdentBase f vn) (ExpBase f vn)
+                       | ForIn (PatternBase f vn) (ExpBase f vn)
                        | While (ExpBase f vn)
 deriving instance Showable f vn => Show (LoopFormBase f vn)
 

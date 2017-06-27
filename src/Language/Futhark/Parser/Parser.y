@@ -642,13 +642,10 @@ LetBody :: { UncheckedExp }
 
 LoopForm : for VarId '<' Exp
            { For FromUpTo ZeroBound $2 $4 }
-         | for Atom '<=' VarId '<' Exp
-           { For FromUpTo (ExpBound $2) $4 $6 }
-         | for Atom '>' VarId '>=' Exp
-           { For FromDownTo (ExpBound $6) $4 $2 }
-         | for Atom '>' VarId
-           { For FromDownTo ZeroBound $4 $2 }
-         | while Exp      { While $2 }
+         | for Pattern in Exp
+           { ForIn $2 $4 }
+         | while Exp
+           { While $2 }
 
 VarSlice :: { (Name, [UncheckedDimIndex], SrcLoc) }
           : 'id[' sepBy(DimIndex, ',') ']'

@@ -258,6 +258,8 @@ instance (Eq vn, Hashable vn, Pretty vn) => Pretty (LoopFormBase ty vn) where
     text "for" <+> align (ppr lbound) <+> ppr i <+> text "<" <+> align (ppr ubound)
   ppr (For FromDownTo lbound i ubound) =
     text "for" <+> align (ppr ubound) <+> ppr i <+> text ">" <+> align (ppr lbound)
+  ppr (ForIn x e) =
+    text "for" <+> ppr x <+> text "in" <+> ppr e
   ppr (While cond) =
     text "while" <+> ppr cond
 

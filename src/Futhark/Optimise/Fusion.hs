@@ -623,8 +623,9 @@ fusionGatherExp fres (DoLoop ctx val form loop_body) = do
   let pat_vars = map (Var . paramName)  merge_pat
   fres' <- foldM fusionGatherSubExp fres (ini_val++pat_vars)
   (fres'', form_idents) <- case form of
-    ForLoop i _ bound ->
-      (,) <$> fusionGatherSubExp fres' bound <*> pure [Ident i $ Prim int32]
+    ForLoop i _ bound loopvars ->
+      (,) <$> foldM fusionGatherSubExp fres' (bound:map (Var . snd) loopvars) <*>
+      pure (Ident i (Prim int32) : map (paramIdent . fst) loopvars)
     WhileLoop cond ->
       (,) <$> fusionGatherSubExp fres' (Var cond) <*> pure []
 
@@ -733,7 +734,9 @@ fuseInExp (DoLoop ctx val form loopbody) =
     return $ DoLoop ctx val form loopbody'
   where form_idents = case form of
           WhileLoop{} -> []
-          ForLoop i it _ -> [Ident i $ Prim $ IntType it]
+          ForLoop i it _ loopvars ->
+            Ident i (Prim $ IntType it) :
+            map (paramIdent . fst) loopvars
 
 fuseInExp e = mapExpM fuseIn e
 
