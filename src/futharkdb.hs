@@ -6,9 +6,10 @@ module Main (main) where
 
 import Control.Exception
 import Data.Char
+import Data.List(find)
 import Data.Maybe
 import Control.Monad
-import Control.Monad.Reader
+--import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Except
 import Data.Monoid
@@ -26,6 +27,8 @@ import Futhark.Debugger
 import Futhark.Pipeline(CompilerError(ExternalError))
 import Futhark.Util.Options
 
+{- TYPES -}
+
 -- commandline options, not currently used
 newtype DebuggerConfig = DebuggerConfig { entryPoint :: Name }
 
@@ -41,20 +44,23 @@ options = [ Option "e" ["entry-point"]
           ]
 
 -- current program state, and last command executed
-data DebuggerState a = DebuggerState
-       { lastState :: Maybe (DebuggerT IO a)
+data DebuggerState = DebuggerState
+       { lastState :: Maybe ProgramState
        , lastCommand :: Maybe Command
        }
 
-newDebuggerState :: Maybe (DebuggerT IO a) -> DebuggerState a
+newDebuggerState :: Maybe ProgramState -> DebuggerState
 newDebuggerState p = DebuggerState
        { lastState = p
        , lastCommand = Nothing
        }
 
-type FutharkdbM b a = StateT (DebuggerState b) IO a
+type ProgramState = (DebuggerT IO [Value], ExportedEnv)
+type FutharkdbM = StateT DebuggerState IO
 
-{- Entry point. Takes filename and entry point as commandline arguments -}
+{- ENTRY POINT -}
+
+{- Takes filename and entry point as commandline arguments -}
 main :: IO ()
 main = reportingIOErrors $
        mainWithOptions debuggerConfig options run
@@ -72,19 +78,19 @@ main = reportingIOErrors $
         run [] _config = Just $ repl Nothing
         run _ _config  = Nothing
 
-        repl :: Maybe (DebuggerT IO [Value]) -> IO ()
+        repl :: Maybe ProgramState -> IO ()
         repl pr = do
           putStrLn "Run help for a list of commands."
           evalStateT (forever readEvalPrint) (newDebuggerState pr)
 
-runProgram :: Prog -> Name -> DebuggerT IO [Value]
+runProgram :: Prog -> Name -> ProgramState
 runProgram prog entry =
     let ep = if nameToString entry == ""
              then defaultEntryPoint
              else entry in
     runFun ep [] prog
 
-readEvalPrint :: FutharkdbM [Value] ()
+readEvalPrint :: FutharkdbM ()
 readEvalPrint = do
   liftIO $ putStr "> "
   liftIO $ hFlush stdout
@@ -95,33 +101,69 @@ readEvalPrint = do
       st <- get
       case lastCommand st of
           Just cmd -> cmd ""
-          Nothing ->
-            liftIO $ putStrLn "No command"
+          Nothing -> liftIO $ putStrLn "No command"
   else
     case lookup cmdname commands of
-      Just (cmdf, _) -> cmdf arg
+      Just (cmdf, _) -> do
+        updateLastCommand cmdf
+        cmdf arg
       Nothing -> liftIO $ T.putStrLn $ "Unknown command '" <> cmdname <> "'"
 
-type Command = T.Text -> FutharkdbM [Value] ()
+{- COMMANDS -}
 
-updateLastCommand :: Command -> FutharkdbM [Value] ()
+type Command = T.Text -> FutharkdbM ()
+
+updateLastCommand :: Command -> FutharkdbM ()
 updateLastCommand k =
   modify $ \st -> st { lastCommand = Just k}
 
-updateLastState :: MonadState (DebuggerState a) m => Maybe (DebuggerT IO a) -> m ()
+updateLastState :: MonadState DebuggerState m => Maybe ProgramState -> m ()
 updateLastState s =
   modify $ \st -> st { lastState = s }
+
+getEnv :: FutharkdbM (Maybe ExportedEnv)
+getEnv = do
+  st <- get
+  return $ case lastState st of
+    Nothing -> Nothing
+    Just (_, env) -> Just env
+
+handleVariables :: (VTable -> FutharkdbM ()) -> FutharkdbM ()
+handleVariables cont = do
+  env <- getEnv
+  case env of
+    Nothing -> liftIO $ putStrLn "No environment is currently loaded."
+    (Just e) -> cont (vtable e)
+
+handleStep :: (MonadTrans t, MonadIO (t IO), MonadState DebuggerState (t IO))
+              => (String -> ExportedEnv -> t IO ()) -> t IO ()
+handleStep cont = do
+  st <- get
+  case lastState st of
+    Nothing -> liftIO $ putStrLn "No program is currently loaded."
+    (Just (prog, _)) -> do
+      k <- lift $ runExceptT $ stepDebuggerT prog
+      case k of
+        (Right (Right (desc, env, m'))) -> do
+          updateLastState $ Just (m', env)
+          cont desc env
+        (Right (Left res)) -> do
+          updateLastState Nothing
+          liftIO $ putStrLn ("Result: " ++ show res)
+        (Left err) -> do
+          updateLastState Nothing
+          liftIO $ putStrLn ("Error: " ++ show err)
 
 commands :: [(T.Text, (Command, T.Text))]
 commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
             ("help", (helpCommand, [text|Print a list of commands.|])),
             ("quit", (quitCommand, [text|Quit futharkdb.|])),
             ("run", (runCommand, [text|Run program.|])),
-            ("step", (stepCommand, [text|Make one step in the program.|]))]
+            ("step", (stepCommand, [text|Make one step in the program.|])),
+            ("read", (readCommand, [text|Read the value of a variable.|]))]
   where
         loadCommand :: Command
         loadCommand file = do
-          updateLastCommand loadCommand -- a bit useless since param not kept
           liftIO $ T.putStrLn $ "Reading file " <> file
           res <- liftIO $ runExceptT (readProgram $ T.unpack file)
                  `catch` \(err::IOException) ->
@@ -134,43 +176,31 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
               updateLastState $ Just $ runProgram prog defaultEntryPoint
 
         helpCommand :: Command
-        helpCommand _ = do
-            updateLastCommand helpCommand
-            liftIO $ forM_ commands $ \(cmd, (_, desc)) -> do
-                       T.putStrLn cmd
-                       T.putStrLn $ T.replicate (T.length cmd) "-"
-                       T.putStr desc
-                       T.putStrLn ""
-                       T.putStrLn ""
+        helpCommand _ =
+          liftIO $ forM_ commands $ \(cmd, (_, desc)) -> do
+                     T.putStrLn cmd
+                     T.putStrLn $ T.replicate (T.length cmd) "-"
+                     T.putStr desc
+                     T.putStrLn ""
+                     T.putStrLn ""
 
         quitCommand :: Command
         quitCommand _ = liftIO exitSuccess
 
         stepCommand :: Command
-        stepCommand _ = do
-            updateLastCommand stepCommand
-            st <- get
-            handleProgram (lastState st) (\desc ->
-              liftIO $ putStrLn ("Step: " ++ desc)
-              )
+        stepCommand _ =
+          handleStep (\desc _ -> liftIO $ putStrLn ("Step: " ++ desc))
 
         runCommand :: Command
-        runCommand _ = do
-            updateLastCommand runCommand
-            st <- get
-            handleProgram (lastState st) (runCommand . T.pack)
+        runCommand _ =
+          handleStep (\_ _ -> runCommand "")
 
-        handleProgram Nothing _ =
-            liftIO $ putStrLn "No program is currently loaded."
-        handleProgram (Just prog) f = do
-            m <- lift $ runExceptT $ stepDebuggerT prog
-            case m of
-              (Right (Right (desc, m'))) -> do
-                updateLastState $ Just m'
-                f desc
-              (Right (Left res)) -> do
-                updateLastState Nothing
-                liftIO $ putStrLn ("Result: " ++ show res)
-              (Left err) -> do
-                updateLastState Nothing
-                liftIO $ putStrLn ("Error: " ++ show err)
+        readCommand :: Command
+        readCommand var =
+          handleVariables (\vars ->
+            case find (\(n, _) -> baseString n == T.unpack var) vars of
+              Nothing ->
+                liftIO $ putStrLn ("No variable named " ++ show var)
+              (Just (_, v)) ->
+                liftIO $ putStrLn (pretty v)
+            )
