@@ -74,6 +74,9 @@ executables:
   futhark-c:
     <<: *futhark
     main: src/futhark-c.hs
+  futharkdb:
+    <<: *futhark
+    main: src/futharkdb.hs
   futhark-opencl:
     <<: *futhark
     main: src/futhark-opencl.hs
