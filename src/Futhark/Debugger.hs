@@ -5,11 +5,11 @@
 
 module Futhark.Debugger
   ( DebuggerError
-  , DebugT
-  , EDebugT
-  , FutharkEnv
+  , DebuggerEnv
+  , DebuggerT
+  , debuggerT
   , runFun
-  , stepDebugT
+  , stepDebuggerT
   )
 where
 
@@ -22,58 +22,64 @@ import Language.Futhark.Core(locStr)
 import Language.Futhark
 import Futhark.Representation.Primitive(intValue, valueIntegral)
 
--- currently unused
 data DebuggerError = Generic String
 instance Show DebuggerError where
   show (Generic s) = s
 
-newtype DebugT m a = DebugT { stepDebugT :: m (Either a (String, DebugT m a)) }
+newtype BaseDebuggerT m a =
+  DebuggerT { stepDebuggerT :: m (Either a (String, BaseDebuggerT m a)) }
 
-instance Monad m => Monad (DebugT m) where
-  return x = DebugT $ return $ Left x
+instance Monad m => Monad (BaseDebuggerT m) where
+  return x = DebuggerT $ return $ Left x
 
-  m >>= f = DebugT $ do
-    x <- stepDebugT m
+  m >>= f = DebuggerT $ do
+    x <- stepDebuggerT m
     case x of
       Left x' ->
-        stepDebugT $ f x'
+        stepDebuggerT $ f x'
       Right (desc, m') ->
         return $ Right (desc, m' >>= f)
 
-instance Monad m => Functor (DebugT m) where
+instance Monad m => Functor (BaseDebuggerT m) where
   fmap = liftM
 
-instance Monad m => Applicative (DebugT m) where
+instance Monad m => Applicative (BaseDebuggerT m) where
   pure = return
   df <*> dx = df >>= \f -> liftM f dx
 
+debuggerT :: Monad m =>
+             m (Either a (String, BaseDebuggerT m a)) -> BaseDebuggerT m a
+debuggerT = DebuggerT
+
 -- debugger transformer with error
-type EDebugT m = DebugT (ExceptT DebuggerError m)
+type DebuggerT m = BaseDebuggerT (ExceptT DebuggerError m)
 
-instance Monad m => MonadError DebuggerError (EDebugT m) where
-  throwError e = DebugT $ throwError e
-  a `catchError` e = DebugT $ stepDebugT a `catchError` (stepDebugT . e)
 
-step :: Monad m => String -> EDebugT m a -> EDebugT m a
-step desc m = DebugT $ return $ Right (desc, m)
+instance Monad m => MonadError DebuggerError (DebuggerT m) where
+  throwError e = debuggerT $ throwError e
+  a `catchError` e =
+    debuggerT $ stepDebuggerT a `catchError` (stepDebuggerT . e)
+
+step :: Monad m => String -> DebuggerT m a -> DebuggerT m a
+step desc m = debuggerT $ return $ Right (desc, m)
 
 -- TODO: we probably want this to be only for builtin functions.
-type Fun m = FutharkEnv m -> [Value] -> EDebugT m [Value]
+type Fun m = DebuggerEnv m -> [Value] -> DebuggerT m [Value]
 type FunTable m = [(Name, Fun m)]
 type VTable = [(VName, Value)]
 
 -- reader environment for interpreter
-data FutharkEnv m = FutharkEnv { envVtable :: VTable
+data DebuggerEnv m = DebuggerEnv { envVtable :: VTable
                                , envFtable :: FunTable m
                                }
 
-lookupVar :: Monad m => VName -> FutharkEnv m -> EDebugT m Value
+lookupVar :: Monad m => VName -> DebuggerEnv m -> DebuggerT m Value
 lookupVar vname env =
   case lookup vname (envVtable env) of
     Just val' -> return val'
     Nothing   -> throwError $ Generic $ "lookupVar " ++ show vname
 
-bindVar :: VName -> Value -> FutharkEnv m -> FutharkEnv m
+bindVar :: VName -> Value -> DebuggerEnv m -> DebuggerEnv m
 bindVar name val table =
   table { envVtable = (name, val) : envVtable table }
 
@@ -100,7 +106,7 @@ getBinOp vname x y =
       (_, _, _) ->
           error "Debugger error: UNIMPLEMENTED"
 
-evalBody :: Monad m => FutharkEnv m -> Exp -> EDebugT m [Value]
+evalBody :: Monad m => DebuggerEnv m -> Exp -> DebuggerT m [Value]
 evalBody env body =
   case body of
       Literal p _loc -> return [PrimValue p]
@@ -145,9 +151,10 @@ mkFun :: Monad m => FunBind -> (Name, Fun m)
 mkFun fu =
   let name = case funBindName fu of VName n _ -> n
       fun env n =
-          let params = case funBindParams fu of
-                           [TuplePattern x _] -> x
-                           _ -> fail "function was not given expected (...) parameters"
+          let params =
+                case funBindParams fu of
+                  [TuplePattern x _] -> x
+                  _ -> fail "function was not given expected (...) parameters"
               vtable = zip (map getPatternName params) n in
               -- TODO: needs bounds checking
               -- and support for binding values in-place
@@ -171,10 +178,10 @@ buildFunTable prog =
       funcs = mkDec decs in
   foldl (\acc elt -> mkFun elt : acc) [] funcs
 
-runFun :: Monad m => Name -> [Value] -> Prog -> EDebugT m [Value]
+runFun :: Monad m => Name -> [Value] -> Prog -> DebuggerT m [Value]
 runFun fname args prog =
   let ftable = buildFunTable prog
-      env = FutharkEnv { envVtable = [], envFtable = ftable } in
+      env = DebuggerEnv { envVtable = [], envFtable = ftable } in
   case lookup fname ftable of
      Just f -> f env args
-     _ -> DebugT $ throwError $ Generic "no function"
+     _ -> DebuggerT $ throwError $ Generic "no function"

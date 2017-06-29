@@ -42,11 +42,11 @@ options = [ Option "e" ["entry-point"]
 
 -- current program state, and last command executed
 data DebuggerState a = DebuggerState
-       { lastState :: Maybe (EDebugT IO a)
+       { lastState :: Maybe (DebuggerT IO a)
        , lastCommand :: Maybe Command
        }
 
-newDebuggerState :: Maybe (EDebugT IO a) -> DebuggerState a
+newDebuggerState :: Maybe (DebuggerT IO a) -> DebuggerState a
 newDebuggerState p = DebuggerState
        { lastState = p
        , lastCommand = Nothing
@@ -72,12 +72,12 @@ main = reportingIOErrors $
         run [] _config = Just $ repl Nothing
         run _ _config  = Nothing
 
-        repl :: Maybe (EDebugT IO [Value]) -> IO ()
+        repl :: Maybe (DebuggerT IO [Value]) -> IO ()
         repl pr = do
           putStrLn "Run help for a list of commands."
           evalStateT (forever readEvalPrint) (newDebuggerState pr)
 
-runProgram :: Prog -> Name -> EDebugT IO [Value]
+runProgram :: Prog -> Name -> DebuggerT IO [Value]
 runProgram prog entry =
     let ep = if nameToString entry == ""
              then defaultEntryPoint
@@ -108,7 +108,7 @@ updateLastCommand :: Command -> FutharkdbM [Value] ()
 updateLastCommand k =
   modify $ \st -> st { lastCommand = Just k}
 
-updateLastState :: MonadState (DebuggerState a) m => Maybe (EDebugT IO a) -> m ()
+updateLastState :: MonadState (DebuggerState a) m => Maybe (DebuggerT IO a) -> m ()
 updateLastState s =
   modify $ \st -> st { lastState = s }
 
@@ -163,7 +163,7 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
         handleProgram Nothing _ =
             liftIO $ putStrLn "No program is currently loaded."
         handleProgram (Just prog) f = do
-            m <- lift $ runExceptT $ stepDebugT prog
+            m <- lift $ runExceptT $ stepDebuggerT prog
             case m of
               (Right (Right (desc, m'))) -> do
                 updateLastState $ Just m'
