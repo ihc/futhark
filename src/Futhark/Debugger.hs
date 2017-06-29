@@ -6,6 +6,7 @@
 module Futhark.Debugger
   ( DebuggerError
   , DebugT
+  , EDebugT
   , FutharkEnv
   , runFun
   , stepDebugT
@@ -13,7 +14,7 @@ module Futhark.Debugger
 where
 
 import Control.Applicative
-import Control.Monad.Reader
+import Control.Monad.Except
 import Data.List
 import Data.Loc(srclocOf)
 import Prelude
@@ -24,7 +25,7 @@ import Futhark.Representation.Primitive(intValue, valueIntegral)
 -- currently unused
 data DebuggerError = Generic String
 instance Show DebuggerError where
-  show (Generic s) = "Debugger error: " ++ s
+  show (Generic s) = s
 
 newtype DebugT m a = DebugT { stepDebugT :: m (Either a (String, DebugT m a)) }
 
@@ -46,11 +47,18 @@ instance Monad m => Applicative (DebugT m) where
   pure = return
   df <*> dx = df >>= \f -> liftM f dx
 
-step :: Monad m => String -> DebugT m a -> DebugT m a
+-- debugger transformer with error
+type EDebugT m = DebugT (ExceptT DebuggerError m)
+
+instance Monad m => MonadError DebuggerError (EDebugT m) where
+  throwError e = DebugT $ throwError e
+  a `catchError` e = DebugT $ stepDebugT a `catchError` (stepDebugT . e)
+
+step :: Monad m => String -> EDebugT m a -> EDebugT m a
 step desc m = DebugT $ return $ Right (desc, m)
 
 -- TODO: we probably want this to be only for builtin functions.
-type Fun m = FutharkEnv m -> [Value] -> DebugT m [Value]
+type Fun m = FutharkEnv m -> [Value] -> EDebugT m [Value]
 type FunTable m = [(Name, Fun m)]
 type VTable = [(VName, Value)]
 
@@ -59,11 +67,11 @@ data FutharkEnv m = FutharkEnv { envVtable :: VTable
                                , envFtable :: FunTable m
                                }
 
-lookupVar :: Monad m => VName -> FutharkEnv m -> DebugT m Value
+lookupVar :: Monad m => VName -> FutharkEnv m -> EDebugT m Value
 lookupVar vname env =
   case lookup vname (envVtable env) of
     Just val' -> return val'
-    Nothing   -> fail $ "lookupVar " ++ show vname
+    Nothing   -> throwError $ Generic $ "lookupVar " ++ show vname
 
 bindVar :: VName -> Value -> FutharkEnv m -> FutharkEnv m
 bindVar name val table =
@@ -92,7 +100,7 @@ getBinOp vname x y =
       (_, _, _) ->
           error "Debugger error: UNIMPLEMENTED"
 
-evalBody :: Monad m => FutharkEnv m -> Exp -> DebugT m [Value]
+evalBody :: Monad m => FutharkEnv m -> Exp -> EDebugT m [Value]
 evalBody env body =
   case body of
       Literal p _loc -> return [PrimValue p]
@@ -131,7 +139,7 @@ evalBody env body =
           step ("Applying binop (" ++ sname ++ ")") $ return [bino ee1 ee2]
 
       _ ->
-        fail "Debugger error: UNIMPLEMENTED"
+        throwError $ Generic "unimplemented"
 
 mkFun :: Monad m => FunBind -> (Name, Fun m)
 mkFun fu =
@@ -145,7 +153,7 @@ mkFun fu =
               -- and support for binding values in-place
               -- (i.e. unique type array inplace modification)
           if length params /= length n
-          then fail ("not same parameter length" ++ show n)
+          then throwError $ Generic ("not same parameter length" ++ show n)
           else evalBody (extendVtable vtable env) $ funBindBody fu
           where extendVtable vtable en =
                   en { envVtable = vtable  ++ envVtable en }
@@ -163,10 +171,10 @@ buildFunTable prog =
       funcs = mkDec decs in
   foldl (\acc elt -> mkFun elt : acc) [] funcs
 
-runFun :: Monad m => Name -> [Value] -> Prog -> DebugT m [Value]
+runFun :: Monad m => Name -> [Value] -> Prog -> EDebugT m [Value]
 runFun fname args prog =
   let ftable = buildFunTable prog
       env = FutharkEnv { envVtable = [], envFtable = ftable } in
   case lookup fname ftable of
      Just f -> f env args
-     _ -> DebugT $ fail "no function"
+     _ -> DebugT $ throwError $ Generic "no function"
