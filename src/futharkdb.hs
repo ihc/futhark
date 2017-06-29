@@ -9,7 +9,6 @@ import Data.Char
 import Data.List(find)
 import Data.Maybe
 import Control.Monad
---import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Except
 import Data.Monoid
@@ -22,6 +21,7 @@ import System.Exit
 import System.Console.GetOpt
 
 import Language.Futhark as AST
+import Language.Futhark.Core(locStr)
 import Futhark.Compiler(readProgram, reportingIOErrors, dumpError, newFutharkConfig)
 import Futhark.Debugger
 import Futhark.Pipeline(CompilerError(ExternalError))
@@ -128,6 +128,12 @@ getEnv = do
     Nothing -> Nothing
     Just (_, env) -> Just env
 
+printLoc :: String -> FutharkdbM ()
+printLoc s =
+  handleEnv (\env ->
+    liftIO $ putStrLn (locStr (location env) ++ ": " ++ s)
+  )
+
 handleEnv :: (ExportedEnv -> FutharkdbM ()) -> FutharkdbM ()
 handleEnv cont = do
   env <- getEnv
@@ -190,7 +196,7 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
 
         stepCommand :: Command
         stepCommand _ =
-          handleStep (\desc _ -> liftIO $ putStrLn ("Step: " ++ desc))
+          handleStep (\desc _ -> printLoc desc)
 
         nextCommand :: Command
         nextCommand _ =
@@ -198,7 +204,7 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
             let dep = depth env
                 cont desc e =
                   if depth e == dep
-                  then liftIO $ putStrLn ("Next: " ++ desc)
+                  then printLoc desc
                   else handleStep cont in
             handleStep cont
             )
@@ -210,9 +216,14 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
         readCommand :: Command
         readCommand var =
           handleEnv (\env ->
-            case find (\(n, _) -> baseString n == T.unpack var) $ vtable env of
-              Nothing ->
-                liftIO $ putStrLn ("No variable named " ++ show var)
-              (Just (_, v)) ->
-                liftIO $ putStrLn (pretty v)
+            if var == ""
+            then -- list all
+              liftIO $ forM_ (vtable env) $ \(n, val) ->
+                         putStrLn (baseString n ++ ": " ++ show (pretty val))
+            else
+              case find (\(n, _) -> baseString n == T.unpack var) $ vtable env of
+                Nothing ->
+                  liftIO $ putStrLn ("No variable named " ++ show var)
+                (Just (_, v)) ->
+                  liftIO $ putStrLn (pretty v)
             )

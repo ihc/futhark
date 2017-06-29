@@ -5,7 +5,7 @@
 
 module Futhark.Debugger
   ( DebuggerError
-  , ExportedEnv, vtable, VTable, depth
+  , ExportedEnv, vtable, VTable, depth, location
   , DebuggerT
   , debuggerT
   , runFun
@@ -16,9 +16,8 @@ where
 import Control.Applicative
 import Control.Monad.Except
 import Data.List
-import Data.Loc(srclocOf)
+import Data.Loc
 import Prelude
-import Language.Futhark.Core(locStr)
 import Language.Futhark
 import Futhark.Representation.Primitive(intValue, valueIntegral)
 
@@ -80,16 +79,22 @@ type VTable = [(VName, Value)]
 data DebuggerEnv m = DebuggerEnv { envVtable :: VTable
                                  , envFtable :: FunTable m
                                  , evaluationDepth :: Int
+                                 , envLocation :: SrcLoc
                                  }
 
 -- the environment that is exposed to the outside.
 data ExportedEnv = ExportedEnv { vtable :: VTable
                                , depth :: Int
+                               , location :: SrcLoc
                                }
 
 newDebuggerEnv :: Monad m => FunTable m -> DebuggerEnv m
 newDebuggerEnv ftable =
-  DebuggerEnv { envVtable = [], envFtable = ftable, evaluationDepth = 0 }
+  DebuggerEnv { envVtable = []
+              , envFtable = ftable
+              , evaluationDepth = 0
+              , envLocation = noLoc
+              }
 
 lookupVar :: Monad m => VName -> DebuggerEnv m -> DebuggerT m Value
 lookupVar vname env =
@@ -98,8 +103,8 @@ lookupVar vname env =
     Nothing   -> throwError $ Generic $ "lookupVar " ++ show vname
 
 bindVar :: VName -> Value -> DebuggerEnv m -> DebuggerEnv m
-bindVar name val table =
-  table { envVtable = (name, val) : envVtable table }
+bindVar name val env =
+  env { envVtable = (name, val) : envVtable env }
 
 extendVtable :: VTable -> DebuggerEnv m -> DebuggerEnv m
 extendVtable vt env =
@@ -109,9 +114,14 @@ inc :: DebuggerEnv m -> DebuggerEnv m
 inc env =
   env { evaluationDepth = evaluationDepth env + 1 }
 
+setLocation :: SrcLoc -> DebuggerEnv m -> DebuggerEnv m
+setLocation s env =
+  env { envLocation = s }
+
 export :: DebuggerEnv m -> ExportedEnv
 export e = ExportedEnv { vtable = envVtable e
                        , depth = evaluationDepth e
+                       , location = envLocation e
                        }
 
 {- HELPERS -}
@@ -140,7 +150,7 @@ getBinOp vname x y =
 
 evalBody :: Monad m => Exp -> DebuggerEnv m -> DebuggerT m [Value]
 evalBody body ev =
-  let env = inc ev in
+  let env = setLocation (srclocOf body) (inc ev) in
   case body of
       Literal p _loc -> return [PrimValue p]
 
@@ -155,24 +165,21 @@ evalBody body ev =
         let vname = getPatternName pat in -- assume just one for now
         do
           [v] <- evalBody val env
-          step env (locStr (srclocOf e)
-                 ++ ": Binding variable \"" ++ baseString vname
-                 ++ "\" to :" ++ show (pretty v))
+          step env ("Binding variable \"" ++ baseString vname
+                    ++ "\" to :" ++ show (pretty v))
             $ evalBody e $ bindVar (getPatternName pat) v env
 
       BinOp name (e1,_) (e2,_) _ _ ->
         let bname = qualLeaf name
             bino = getBinOp bname
-            sname = case bname of VName n _ -> nameToString n in
+            sname = baseString bname in
         do
           [ee1] <- step env
-                     (locStr (srclocOf e1)
-                       ++ ": Evaluating first operand of binop ("
+                     ("Evaluating first operand of binop ("
                        ++ sname ++ "): " ++ show (pretty e1))
                      $ evalBody e1 env
           [ee2] <- step env
-                     (locStr (srclocOf e2)
-                       ++ ": Evaluating second operand of binop ("
+                     ("Evaluating second operand of binop ("
                        ++ sname ++ "): " ++ show (pretty e2))
                      $ evalBody e2 env
           step env ("Applying binop (" ++ sname ++ ")") $ return [bino ee1 ee2]
@@ -188,13 +195,13 @@ mkFun fu =
                 case funBindParams fu of
                   [TuplePattern x _] -> x
                   _ -> fail "function was not given expected (...) parameters"
-              vtable = zip (map getPatternName params) n in
+              vt = zip (map getPatternName params) n in
               -- TODO: needs bounds checking
               -- and support for binding values in-place
               -- (i.e. unique type array inplace modification)
           if length params /= length n
           then throwError $ Generic ("not same parameter length" ++ show n)
-          else evalBody (funBindBody fu) $ extendVtable vtable env
+          else evalBody (funBindBody fu) $ extendVtable vt env
   in
   (name, fun)
 
