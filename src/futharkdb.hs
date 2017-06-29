@@ -128,12 +128,12 @@ getEnv = do
     Nothing -> Nothing
     Just (_, env) -> Just env
 
-handleVariables :: (VTable -> FutharkdbM ()) -> FutharkdbM ()
-handleVariables cont = do
+handleEnv :: (ExportedEnv -> FutharkdbM ()) -> FutharkdbM ()
+handleEnv cont = do
   env <- getEnv
   case env of
     Nothing -> liftIO $ putStrLn "No environment is currently loaded."
-    (Just e) -> cont (vtable e)
+    (Just e) -> cont e
 
 handleStep :: (MonadTrans t, MonadIO (t IO), MonadState DebuggerState (t IO))
               => (String -> ExportedEnv -> t IO ()) -> t IO ()
@@ -160,7 +160,8 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
             ("quit", (quitCommand, [text|Quit futharkdb.|])),
             ("run", (runCommand, [text|Run program.|])),
             ("step", (stepCommand, [text|Make one step in the program.|])),
-            ("read", (readCommand, [text|Read the value of a variable.|]))]
+            ("read", (readCommand, [text|Read the value of a variable.|])),
+            ("next", (nextCommand, [text|Skip until same evaluation depth is reached.|]))]
   where
         loadCommand :: Command
         loadCommand file = do
@@ -191,14 +192,25 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
         stepCommand _ =
           handleStep (\desc _ -> liftIO $ putStrLn ("Step: " ++ desc))
 
+        nextCommand :: Command
+        nextCommand _ =
+          handleEnv (\env ->
+            let dep = depth env
+                cont desc e =
+                  if depth e == dep
+                  then liftIO $ putStrLn ("Next: " ++ desc)
+                  else handleStep cont in
+            handleStep cont
+            )
+
         runCommand :: Command
         runCommand _ =
           handleStep (\_ _ -> runCommand "")
 
         readCommand :: Command
         readCommand var =
-          handleVariables (\vars ->
-            case find (\(n, _) -> baseString n == T.unpack var) vars of
+          handleEnv (\env ->
+            case find (\(n, _) -> baseString n == T.unpack var) $ vtable env of
               Nothing ->
                 liftIO $ putStrLn ("No variable named " ++ show var)
               (Just (_, v)) ->
