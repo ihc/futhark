@@ -219,7 +219,7 @@ commands = [ ("help",  (helpCommand,
             if var == ""
             then -- no variable name provided, list all
               liftIO $ forM_ vtable $ \(n, val) ->
-                         putStrLn (baseString n ++ ": " ++ show (pretty val))
+                         putStrLn (baseString n ++ ": " ++ pretty val)
             else
               case find (\(n, _) -> baseString n == T.unpack var) vtable of
                 Nothing ->
@@ -322,7 +322,7 @@ handleStep cont =
           handleHitBreakpoints nextStep cont
       (Right (Left res)) -> do
         resetHistory
-        liftIO $ putStrLn ("Result: " ++ show (pretty res))
+        liftIO $ putStrLn ("Result: " ++ pretty res)
       (Left err) -> do
         resetHistory
         liftIO $ putStrLn ("Error: " ++ show err)

@@ -85,7 +85,6 @@ step env desc m =
 {- ENVIRONMENT                                                                -}
 {------------------------------------------------------------------------------}
 
--- TODO: we probably want this to be only for builtin functions.
 type Fun m = DebuggerEnv m -> [Value] -> DebuggerT m [Value]
 
 -- TODO: use maps instead of lists
@@ -121,9 +120,16 @@ bindVar :: VName -> Value -> DebuggerEnv m -> DebuggerEnv m
 bindVar name val env =
   env { dbVtable = (name, val) : dbVtable env }
 
-extendVtable :: VTable -> DebuggerEnv m -> DebuggerEnv m
-extendVtable vt env =
-  env { dbVtable = vt ++ dbVtable env }
+replaceVtable :: VTable -> DebuggerEnv m -> DebuggerEnv m
+replaceVtable vt env =
+  env { dbVtable = vt }
+
+lookupFun :: Monad m => Name -> DebuggerEnv m -> DebuggerT m (Fun m)
+lookupFun nm env =
+  case lookup nm (dbFtable env) of
+    Just fun' -> return fun'
+    Nothing   -> throwError $ Generic $ "lookupFun " ++ show nm
+
 
 incDepth :: DebuggerEnv m -> DebuggerEnv m
 incDepth env =
@@ -148,12 +154,18 @@ getPatternName x =
     Wildcard _ _ -> VName (nameFromString "wildcardPattern") 1
     PatternAscription p _ -> getPatternName p
 
+-- TODO: make this less sad
 getBinOp :: VName -> Value -> Value -> Value
 getBinOp vname x y =
   case (baseString vname, x, y) of
     ("+", PrimValue (SignedValue a), PrimValue (SignedValue b)) ->
         let (c,d) = (valueIntegral a, valueIntegral b) :: (Int, Int) in
         PrimValue $ SignedValue $ intValue Int32 (c + d)
+    ("-", PrimValue (SignedValue a), PrimValue (SignedValue b)) ->
+        let (c,d) = (valueIntegral a, valueIntegral b) :: (Int, Int) in
+        PrimValue $ SignedValue $ intValue Int32 (c - d)
+    (">", PrimValue (SignedValue a), PrimValue (SignedValue b)) ->
+        PrimValue $ BoolValue $ a > b
     (op, _, _) ->
         error $ "Debugger error: unimplemented binop (" ++ op ++ ")"
 
@@ -186,8 +198,8 @@ evalExp body ev =
         val <- lookupVar (qualLeaf name) env
         return [val]
 
-    Ascript _e _typedecl _ ->
-      unimp "ascript"
+    Ascript e _typedecl _ ->
+      evalExp e env -- TODO: use type ascription?
 
     LetPat _ pat val e _ ->
       let vname = getPatternName pat in -- assume just one for now
@@ -200,11 +212,32 @@ evalExp body ev =
     LetFun _vname (_paramtypes, _patterns, _rettypeexp, _structtyp, _exp) _body _ ->
       unimp "let function expression"
 
-    If cond _t _e _compty _ ->
-      unimp "if"
+    If cond t e _compty _ ->
+      do
+        [PrimValue (BoolValue ccond)] <- step env
+          ("Evaluating condition of if-statement: " ++ show (pretty cond))
+          $ evalExp cond env
+        if ccond
+        then
+          step env
+            "Evaluating then-branch of if-statement"
+            $ evalExp t env
+        else
+          step env
+            "Evaluating else-branch of if-statement"
+            $ evalExp e env
 
-    Apply _qualname _params _compty _ ->
-      unimp "apply"
+    Apply qualname params _compty _ ->
+      let (VName n _) = qualLeaf qualname in
+      do
+        fun' <- lookupFun n env
+        pparams <- mapM (\(param, _diet) ->
+                    step env
+                      ("Evaluating a parameter in call to function: "
+                      ++ nameToString n)
+                      $ evalExp param env
+                  ) params
+        step env ("Calling function " ++ show n) $ fun' env (concat pparams)
 
     Negate _e _ ->
       unimp "numeric negation"
@@ -227,24 +260,67 @@ evalExp body ev =
                    $ evalExp e2 env
         step env ("Applying binop (" ++ sname ++ ")") $ return [bino ee1 ee2]
 
-    _ ->
-      throwError $ Generic "unimplemented"
+    Project _name _e _comp _ ->
+      unimp "project"
+
+    LetWith _id1 _id2 _dim _e1 _e2 _ ->
+      unimp "letwith"
+
+    Index _e _dim _ ->
+      unimp "index"
+
+    Update _e1 _dim _e2 _ ->
+      unimp "update"
+
+    Split _i _e1 _e2 _ ->
+      unimp "split"
+
+    Concat _i _e1 _e2 _ ->
+      unimp "concat"
+
+    Reshape _e1 _e2 _ ->
+      unimp "reshape"
+
+    Rearrange _dims _e _ ->
+      unimp "rearrange"
+
+    Rotate _i _e1 _e2 _ ->
+      unimp "rotate"
+
+    Map _l _es _ ->
+      unimp "map"
+
+    Reduce _com _lamb _e1 _e2 _ ->
+      unimp "reduce"
+
+    Scan _l _e1 _e2 _ ->
+      unimp "scan"
+
+    Filter _l _e _ ->
+      unimp "filter"
+
+    Partition _ls _e _ ->
+      unimp "partition"
+
+    Stream _stf _l _e _ ->
+      unimp "stream"
+
+    Zip _i _e1 _e2 _ ->
+      unimp "zip"
+
+    Unzip _e _types _ ->
+      unimp "unzip"
+
+    Unsafe _e _ ->
+      unimp "unsafe"
 
 mkFun :: Monad m => FunBind -> (Name, Fun m)
 mkFun fu =
   let name = case funBindName fu of VName n _ -> n
-      fun env n =
-          let params =
-                case funBindParams fu of
-                  [TuplePattern x _] -> x
-                  _ -> fail "function was not given expected (...) parameters"
-              vt = zip (map getPatternName params) n in
-              -- TODO: needs bounds checking
-              -- and support for binding values in-place
-              -- (i.e. unique type array inplace modification)
-          if length params /= length n
-          then throwError $ Generic ("not same parameter length" ++ show n)
-          else evalExp (funBindBody fu) $ extendVtable vt env
+      fun env n = -- static scoping, ignore existing vtable
+          let vt = zip (map getPatternName (funBindParams fu)) n
+              newenv = replaceVtable vt env in
+          evalExp (funBindBody fu) newenv
   in
   (name, fun)
 
@@ -253,6 +329,7 @@ mkDec decs =
   let only_funcs = filter (\x -> case x of FunDec _ -> True; _ -> False) decs in
   map (\x -> case x of FunDec f -> f; _ -> error "not fundec") only_funcs
 
+-- assume type-checked, therefore it is fine to put all functions within scope
 buildFunTable :: Monad m => Prog -> FunTable m
 buildFunTable prog =
   let decs = progDecs prog
