@@ -7,7 +7,7 @@ module Futhark.Debugger
   ( DebuggerError
   , DebuggerT, debuggerT
   , Export(..)
-  , ExportedEnv, vtable, VTable, depth, location
+  , DebuggerEnv, dbVtable, VTable, dbDepth, dbLocation
   , runFun
   , stepDebuggerT
   )
@@ -49,7 +49,7 @@ debuggerT :: m (Either a (s (BaseDebuggerT s m a))) -> BaseDebuggerT s m a
 debuggerT = DebuggerT
 
 -- language-specific debugging monad with error handling
-type DebuggerT m = BaseDebuggerT Export (ExceptT DebuggerError m)
+type DebuggerT m = BaseDebuggerT (Export m) (ExceptT DebuggerError m)
 
 -- error type for interpreter errors
 data DebuggerError = Generic String
@@ -62,8 +62,8 @@ instance Monad m => MonadError DebuggerError (DebuggerT m) where
     debuggerT $ stepDebuggerT a `catchError` (stepDebuggerT . e)
 
 -- functor that we use to wrap information that is exported in a step
-data Export a = Export String ExportedEnv a
-instance Functor Export where
+data Export m a = Export String (DebuggerEnv m) a
+instance Monad m => Functor (Export m) where
   fmap f (Export a b c) = Export a b (f c)
 
 -- insert one single step with the given environment and description
@@ -71,7 +71,7 @@ step :: Monad m
         => DebuggerEnv m -> String -> DebuggerT m a
         -> DebuggerT m a
 step env desc m =
-  debuggerT $ return $ Right (Export desc (export env) m)
+  debuggerT $ return $ Right (Export desc env m)
 
 
 {- ENVIRONMENT -}
@@ -84,58 +84,46 @@ type FunTable m = [(Name, Fun m)]
 type VTable = [(VName, Value)]
 
 -- reader environment for interpreter
-data DebuggerEnv m = DebuggerEnv { envVtable :: VTable
-                                 , envFtable :: FunTable m
-                                 , evaluationDepth :: Int
-                                 , envLocation :: SrcLoc
+data DebuggerEnv m = DebuggerEnv { dbVtable :: VTable
+                                 , dbFtable :: FunTable m
+                                 , dbDepth :: Int
+                                 , dbLocation :: SrcLoc
                                  }
-
--- the environment that is exposed to the outside.
-data ExportedEnv = ExportedEnv { vtable :: VTable
-                               , depth :: Int
-                               , location :: SrcLoc
-                               }
 
 newDebuggerEnv :: Monad m => FunTable m -> DebuggerEnv m
 newDebuggerEnv ftable =
-  DebuggerEnv { envVtable = []
-              , envFtable = ftable
-              , evaluationDepth = 0
-              , envLocation = noLoc
+  DebuggerEnv { dbVtable = []
+              , dbFtable = ftable
+              , dbDepth = 0
+              , dbLocation = noLoc
               }
 
 lookupVar :: Monad m => VName -> DebuggerEnv m -> DebuggerT m Value
 lookupVar vname env =
-  case lookup vname (envVtable env) of
+  case lookup vname (dbVtable env) of
     Just val' -> return val'
     Nothing   -> throwError $ Generic $ "lookupVar " ++ show vname
 
 bindVar :: VName -> Value -> DebuggerEnv m -> DebuggerEnv m
 bindVar name val env =
-  env { envVtable = (name, val) : envVtable env }
+  env { dbVtable = (name, val) : dbVtable env }
 
 extendVtable :: VTable -> DebuggerEnv m -> DebuggerEnv m
 extendVtable vt env =
-  env { envVtable = vt ++ envVtable env }
+  env { dbVtable = vt ++ dbVtable env }
 
 inc :: DebuggerEnv m -> DebuggerEnv m
 inc env =
-  env { evaluationDepth = evaluationDepth env + 1 }
+  env { dbDepth = dbDepth env + 1 }
 
 setLocation :: SrcLoc -> DebuggerEnv m -> DebuggerEnv m
 setLocation s env =
-  env { envLocation = s }
-
-export :: DebuggerEnv m -> ExportedEnv
-export e = ExportedEnv { vtable = envVtable e
-                       , depth = evaluationDepth e
-                       , location = envLocation e
-                       }
+  env { dbLocation = s }
 
 
 {- HELPERS -}
 
--- extract variable names for vtable bindings
+-- extract variable name sfor vtable bindings
 getPatternName :: Pattern -> VName
 getPatternName x =
   case x of
@@ -227,10 +215,10 @@ buildFunTable prog =
   foldl (\acc elt -> mkFun elt : acc) [] funcs
 
 runFun :: Monad m =>
-          Name -> [Value] -> Prog -> (DebuggerT m [Value], ExportedEnv)
+          Name -> [Value] -> Prog -> (DebuggerT m [Value], DebuggerEnv m)
 runFun fname args prog =
   let ftable = buildFunTable prog
       env = newDebuggerEnv ftable in
   case lookup fname ftable of
-     Just f -> (f env args, export env)
-     _ -> (debuggerT $ throwError $ Generic "unknown function", export env)
+     Just f -> (f env args, env)
+     _ -> (debuggerT $ throwError $ Generic "unknown function", env)

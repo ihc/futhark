@@ -67,7 +67,7 @@ newDebuggerState p = DebuggerState
        , breakpoints = []
        }
 
-type ProgramState = (DebuggerT IO [Value], ExportedEnv)
+type ProgramState = (DebuggerT IO [Value], DebuggerEnv IO)
 type DebuggerM = StateT DebuggerState IO
 
 {- ENTRY POINT -}
@@ -125,93 +125,8 @@ readEvalPrint = do
 
 type Command = T.Text -> DebuggerM ()
 
-updateLastCommand :: Command -> DebuggerM ()
-updateLastCommand k =
-  modify $ \st -> st { lastCommand = Just k}
-
-updateLastState :: Maybe ProgramState -> DebuggerM ()
-updateLastState s =
-  modify $ \st -> st { lastState = s }
-
-getProgState :: DebuggerM (Maybe ProgramState)
-getProgState = do
-  st <- get
-  return $ lastState st
-
-getBreakpoints :: DebuggerM [Breakpoint]
-getBreakpoints = do
-  st <- get
-  return (breakpoints st)
-
-getStringLoc :: ExportedEnv -> DebuggerM String
-getStringLoc env =
-  return $ locStr $ location env
-
--- returns indices of hit breakpoints
-getHitBreakpoints :: ExportedEnv -> DebuggerM [Int]
-getHitBreakpoints env = do
-  bps <- getBreakpoints
-  return $ getBrokenPoints env bps 0
-  where getBrokenPoints _ [] _ = []
-        getBrokenPoints e (b:bs) ix =
-          if checkBreakpoint e b
-          then ix : getBrokenPoints e bs (ix+1)
-          else getBrokenPoints e bs (ix+1)
-
--- extract program state if any, call continuation on it
-handleProgState :: (DebuggerT IO [Value] -> ExportedEnv -> DebuggerM ())
-                   -> DebuggerM ()
-handleProgState cont = do
-  ps <- getProgState
-  case ps of
-    Nothing -> liftIO $ putStrLn "No program is currently loaded."
-    (Just (p,e)) -> cont p e
-
--- go one step in execution. if more steps and breakpoint not hit,
--- call continuation on description and environment of next suspension.
-handleStep :: (String -> ExportedEnv -> DebuggerM ()) -> DebuggerM ()
-handleStep cont =
-  handleProgState (\prog _ -> do
-    k <- lift $ runExceptT $ stepDebuggerT prog
-    case k of
-      (Right (Right (Export desc env m'))) -> do
-        updateLastState $ Just (m', env)
-        handleHitBreakpoints desc env cont
-      (Right (Left res)) -> do
-        updateLastState Nothing
-        liftIO $ putStrLn ("Result: " ++ show res)
-      (Left err) -> do
-        updateLastState Nothing
-        liftIO $ putStrLn ("Error: " ++ show err)
-    )
-
--- TODO: currently stops every time the breakpoint's line is hit, but there
--- may be several steps in one line. Maybe should only break first time.
-handleHitBreakpoints :: String -> ExportedEnv
-                        -> (String -> ExportedEnv -> DebuggerM ())
-                        -> DebuggerM ()
-handleHitBreakpoints desc env cont = do
-  b <- getHitBreakpoints env
-  case b of
-    [] -> cont desc env
-    x ->
-      liftIO $ forM_ x (\ix -> do
-        putStrLn ("Breakpoint " ++ show ix ++ " hit.")
-        putStrLn (locStr (location env) ++ ": " ++ desc)
-        )
-
-checkBreakpoint :: ExportedEnv -> Breakpoint -> Bool
-checkBreakpoint env (Location _ line) =
-  let loc = location env
-      (_f, l) = getFileLine loc in
-  l == line -- && f == file  -- assume single-file for now
-  where getFileLine (SrcLoc (Loc (Pos f l _ _) _)) = (f, l)
-        getFileLine _ = ("", -1)
-checkBreakpoint _ (Function _) =
-  error "function breakpoint unimplemented"
-
 commands :: [(T.Text, (Command, T.Text))]
-commands = [("load",  (loadCommand, [text|Load a Futhark source file.|]))
+commands = [ ("load", (loadCommand, [text|Load a Futhark source file.|]))
            , ("help", (helpCommand, [text|Print a list of commands.|]))
            , ("quit", (quitCommand, [text|Quit futharkdb.|]))
            , ("run",  (runCommand, [text|Run program.|]))
@@ -258,9 +173,9 @@ commands = [("load",  (loadCommand, [text|Load a Futhark source file.|]))
         nextCommand :: Command
         nextCommand _ =
           handleProgState (\_ env ->
-            let dep = depth env
+            let dep = dbDepth env
                 cont desc e =
-                  if depth e == dep
+                  if dbDepth e == dep
                   then do
                     loc <- getStringLoc e
                     liftIO $ putStrLn (loc ++ ": " ++ desc)
@@ -276,11 +191,11 @@ commands = [("load",  (loadCommand, [text|Load a Futhark source file.|]))
         readCommand var =
           handleProgState (\_ env ->
             if var == ""
-            then -- list all
-              liftIO $ forM_ (vtable env) $ \(n, val) ->
+            then -- no variable name provided, list all
+              liftIO $ forM_ (dbVtable env) $ \(n, val) ->
                          putStrLn (baseString n ++ ": " ++ show (pretty val))
             else
-              case find (\(n, _) -> baseString n == T.unpack var) $ vtable env of
+              case find (\(n, _) -> baseString n == T.unpack var) $ dbVtable env of
                 Nothing ->
                   liftIO $ putStrLn ("No variable named " ++ show var)
                 (Just (_, v)) ->
@@ -309,3 +224,87 @@ commands = [("load",  (loadCommand, [text|Load a Futhark source file.|]))
             putStrLn (show ix ++ ": " ++ show bp)
             return (ix+1)
             ) 0 bps
+
+updateLastCommand :: Command -> DebuggerM ()
+updateLastCommand k =
+  modify $ \st -> st { lastCommand = Just k}
+
+updateLastState :: Maybe ProgramState -> DebuggerM ()
+updateLastState s =
+  modify $ \st -> st { lastState = s }
+
+getProgState :: DebuggerM (Maybe ProgramState)
+getProgState = do
+  st <- get
+  return $ lastState st
+
+getBreakpoints :: DebuggerM [Breakpoint]
+getBreakpoints = do
+  st <- get
+  return (breakpoints st)
+
+getStringLoc :: DebuggerEnv IO -> DebuggerM String
+getStringLoc env =
+  return $ locStr $ dbLocation env
+
+-- returns indices of hit breakpoints
+getHitBreakpoints :: DebuggerEnv IO -> DebuggerM [Int]
+getHitBreakpoints env = do
+  bps <- getBreakpoints
+  return $ getBrokenPoints env bps 0
+  where getBrokenPoints _ [] _ = []
+        getBrokenPoints e (b:bs) ix =
+          if checkBreakpoint e b
+          then ix : getBrokenPoints e bs (ix+1)
+          else getBrokenPoints e bs (ix+1)
+
+-- extract program state if any, call continuation on it
+handleProgState :: (DebuggerT IO [Value] -> DebuggerEnv IO -> DebuggerM ())
+                   -> DebuggerM ()
+handleProgState cont = do
+  ps <- getProgState
+  case ps of
+    Nothing -> liftIO $ putStrLn "No program is currently loaded."
+    (Just (p,e)) -> cont p e
+
+-- go one step in execution. if more steps and breakpoint not hit,
+-- call continuation on description and environment of next suspension.
+handleStep :: (String -> DebuggerEnv IO -> DebuggerM ()) -> DebuggerM ()
+handleStep cont =
+  handleProgState (\prog _ -> do
+    k <- lift $ runExceptT $ stepDebuggerT prog
+    case k of
+      (Right (Right (Export desc env m'))) -> do
+        updateLastState $ Just (m', env)
+        handleHitBreakpoints desc env cont
+      (Right (Left res)) -> do
+        updateLastState Nothing
+        liftIO $ putStrLn ("Result: " ++ show res)
+      (Left err) -> do
+        updateLastState Nothing
+        liftIO $ putStrLn ("Error: " ++ show err)
+    )
+
+-- TODO: currently stops every time the breakpoint's line is hit, but there
+-- may be several steps in one line. Maybe should only break first time.
+handleHitBreakpoints :: String -> DebuggerEnv IO
+                        -> (String -> DebuggerEnv IO -> DebuggerM ())
+                        -> DebuggerM ()
+handleHitBreakpoints desc env cont = do
+  b <- getHitBreakpoints env
+  case b of
+    [] -> cont desc env
+    x ->
+      liftIO $ forM_ x (\ix -> do
+        putStrLn ("Breakpoint " ++ show ix ++ " hit.")
+        putStrLn (locStr (dbLocation env) ++ ": " ++ desc)
+        )
+
+checkBreakpoint :: DebuggerEnv IO -> Breakpoint -> Bool
+checkBreakpoint env (Location _ line) =
+  let (_f, l) = getFileLine $ dbLocation env in
+  l == line -- && f == file  -- assume single-file for now
+  where getFileLine (SrcLoc (Loc (Pos f l _ _) _)) = (f, l)
+        getFileLine _ = ("", -1)
+checkBreakpoint _ (Function _) =
+  error "function breakpoint unimplemented"
