@@ -146,28 +146,36 @@ readEvalPrint = do
 type Command = T.Text -> DebuggerM ()
 
 commands :: [(T.Text, (Command, T.Text))]
-commands = [ ("help",  (helpCommand, [text|Print a list of commands.|]))
-           , ("load",  (loadCommand, [text|Load a Futhark source file.|]))
-           , ("quit",  (quitCommand, [text|Quit futharkdb.|]))
-           , ("run",   (runCommand, [text|Run program.|]))
-           , ("step",  (stepCommand, [text|Make one step in the program.|]))
-           , ("read",  (readCommand, [text|Read the value of a variable.|]))
+commands = [ ("help",  (helpCommand,
+                       [text| Print a list of commands.|]))
+           , ("load", (loadCommand,
+                       [text| <file> Load a Futhark source file.|]))
+           , ("quit",  (quitCommand,
+                       [text| Quit futharkdb.|]))
+           , ("run",   (runCommand,
+                       [text| Run program.|]))
+           , ("step",  (stepCommand,
+                       [text| Make one step in the program.|]))
            , ("next",  (nextCommand,
-                       [text|Skip until same evaluation depth is reached.|]))
-           , ("break", (breakCommand, [text|Add a breakpoint.|]))
-           , ("list",  (listCommand, [text|List all breakpoints.|]))
+                       [text| Skip until same evaluation depth is reached.|]))
            , ("back",  (backCommand,
-                       [text|Make one step in backwards direction.|]))
+                       [text| Make one step in backwards direction.|]))
+           , ("break", (breakCommand,
+                       [text| <num> Add a breakpoint for a line number.|]))
+           , ("list",  (listCommand,
+                       [text| List all breakpoints.|]))
+           , ("read",  (readCommand,
+                       [text| Read all the variables in scope.|]))
+           , ("read", (readCommand,
+                       [text| <var> Read the value of a variable.|]))
            ]
   where
         helpCommand :: Command
         helpCommand _ =
           liftIO $ forM_ commands $ \(cmd, (_, desc)) -> do
-                     T.putStrLn cmd
-                     T.putStrLn $ T.replicate (T.length cmd) "-"
-                     T.putStr desc
-                     T.putStrLn ""
-                     T.putStrLn ""
+                     T.putStr cmd
+                     T.putStr " : "
+                     T.putStrLn desc
 
         loadCommand :: Command
         loadCommand file = do
@@ -314,7 +322,7 @@ handleStep cont =
           handleHitBreakpoints nextStep cont
       (Right (Left res)) -> do
         resetHistory
-        liftIO $ putStrLn ("Result: " ++ show res)
+        liftIO $ putStrLn ("Result: " ++ show (pretty res))
       (Left err) -> do
         resetHistory
         liftIO $ putStrLn ("Error: " ++ show err)
