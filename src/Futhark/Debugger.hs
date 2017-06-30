@@ -5,9 +5,9 @@
 
 module Futhark.Debugger
   ( DebuggerError
+  , DebuggerT, debuggerT
+  , Export(..)
   , ExportedEnv, vtable, VTable, depth, location
-  , DebuggerT
-  , debuggerT
   , runFun
   , stepDebuggerT
   )
@@ -23,14 +23,11 @@ import Futhark.Representation.Primitive(intValue, valueIntegral)
 
 {- TYPES -}
 
-data DebuggerError = Generic String
-instance Show DebuggerError where
-  show (Generic s) = s
+-- base debugging monad. NOTE: this is basically the coroutine monad
+newtype BaseDebuggerT s m a = DebuggerT
+  { stepDebuggerT :: m (Either a (s (BaseDebuggerT s m a))) }
 
-newtype BaseDebuggerT m a = DebuggerT
-  { stepDebuggerT :: m (Either a (String, ExportedEnv, BaseDebuggerT m a)) }
-
-instance Monad m => Monad (BaseDebuggerT m) where
+instance (Functor s, Monad m) => Monad (BaseDebuggerT s m) where
   return x = DebuggerT $ return $ Left x
 
   m >>= f = DebuggerT $ do
@@ -38,33 +35,44 @@ instance Monad m => Monad (BaseDebuggerT m) where
     case x of
       Left x' ->
         stepDebuggerT $ f x'
-      Right (desc, env, m') ->
-        return $ Right (desc, env, m' >>= f)
+      Right s ->
+        return $ Right (fmap (>>= f) s)
 
-instance Monad m => Functor (BaseDebuggerT m) where
+instance (Functor s, Monad m) => Functor (BaseDebuggerT s m) where
   fmap = liftM
 
-instance Monad m => Applicative (BaseDebuggerT m) where
+instance (Functor s, Monad m) => Applicative (BaseDebuggerT s m) where
   pure = return
   df <*> dx = df >>= \f -> liftM f dx
 
-debuggerT :: Monad m
-             => m (Either a (String, ExportedEnv, BaseDebuggerT m a))
-             -> BaseDebuggerT m a
+debuggerT :: m (Either a (s (BaseDebuggerT s m a))) -> BaseDebuggerT s m a
 debuggerT = DebuggerT
 
--- debugger transformer with error
-type DebuggerT m = BaseDebuggerT (ExceptT DebuggerError m)
+-- language-specific debugging monad with error handling
+type DebuggerT m = BaseDebuggerT Export (ExceptT DebuggerError m)
+
+-- error type for interpreter errors
+data DebuggerError = Generic String
+instance Show DebuggerError where
+  show (Generic s) = s
 
 instance Monad m => MonadError DebuggerError (DebuggerT m) where
   throwError e = debuggerT $ throwError e
   a `catchError` e =
     debuggerT $ stepDebuggerT a `catchError` (stepDebuggerT . e)
 
+-- functor that we use to wrap information that is exported in a step
+data Export a = Export String ExportedEnv a
+instance Functor Export where
+  fmap f (Export a b c) = Export a b (f c)
+
+-- insert one single step with the given environment and description
 step :: Monad m
         => DebuggerEnv m -> String -> DebuggerT m a
         -> DebuggerT m a
-step env desc m = debuggerT $ return $ Right (desc, export env, m)
+step env desc m =
+  debuggerT $ return $ Right (Export desc (export env) m)
+
 
 {- ENVIRONMENT -}
 
@@ -124,6 +132,7 @@ export e = ExportedEnv { vtable = envVtable e
                        , location = envLocation e
                        }
 
+
 {- HELPERS -}
 
 -- extract variable names for vtable bindings
@@ -145,6 +154,7 @@ getBinOp vname x y =
             (intValue Int32 (valueIntegral a + valueIntegral b)))
       (_, _, _) ->
           error "Debugger error: UNIMPLEMENTED"
+
 
 {- INTERPRETER -}
 

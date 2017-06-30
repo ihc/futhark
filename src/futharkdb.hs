@@ -174,7 +174,7 @@ handleStep cont =
   handleProgState (\prog _ -> do
     k <- lift $ runExceptT $ stepDebuggerT prog
     case k of
-      (Right (Right (desc, env, m'))) -> do
+      (Right (Right (Export desc env m'))) -> do
         updateLastState $ Just (m', env)
         handleHitBreakpoints desc env cont
       (Right (Left res)) -> do
