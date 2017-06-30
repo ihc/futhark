@@ -7,6 +7,7 @@ module Main (main) where
 import Control.Exception
 import Data.Char
 import Data.List(find)
+import Data.Loc
 import Data.Maybe
 import Control.Monad
 import Control.Monad.State
@@ -14,6 +15,7 @@ import Control.Monad.Except
 import Data.Monoid
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Data.Text.Read(decimal)
 import NeatInterpolation(text)
 import Prelude
 import System.IO
@@ -43,20 +45,30 @@ options = [ Option "e" ["entry-point"]
             "The entry point to execute."
           ]
 
+data Breakpoint =
+    Location String Int -- file name, line number
+  | Function String     -- function name. should include modules at some point
+
+instance Show Breakpoint where
+  show (Location file line) = "location:" ++ file ++ ":" ++ show line
+  show (Function name) = "function:" ++ name
+
 -- current program state, and last command executed
 data DebuggerState = DebuggerState
        { lastState :: Maybe ProgramState
        , lastCommand :: Maybe Command
+       , breakpoints :: [Breakpoint]
        }
 
 newDebuggerState :: Maybe ProgramState -> DebuggerState
 newDebuggerState p = DebuggerState
        { lastState = p
        , lastCommand = Nothing
+       , breakpoints = []
        }
 
 type ProgramState = (DebuggerT IO [Value], ExportedEnv)
-type FutharkdbM = StateT DebuggerState IO
+type DebuggerM = StateT DebuggerState IO
 
 {- ENTRY POINT -}
 
@@ -90,7 +102,7 @@ runProgram prog entry =
              else entry in
     runFun ep [] prog
 
-readEvalPrint :: FutharkdbM ()
+readEvalPrint :: DebuggerM ()
 readEvalPrint = do
   liftIO $ putStr "> "
   liftIO $ hFlush stdout
@@ -111,63 +123,105 @@ readEvalPrint = do
 
 {- COMMANDS -}
 
-type Command = T.Text -> FutharkdbM ()
+type Command = T.Text -> DebuggerM ()
 
-updateLastCommand :: Command -> FutharkdbM ()
+updateLastCommand :: Command -> DebuggerM ()
 updateLastCommand k =
   modify $ \st -> st { lastCommand = Just k}
 
-updateLastState :: MonadState DebuggerState m => Maybe ProgramState -> m ()
+updateLastState :: Maybe ProgramState -> DebuggerM ()
 updateLastState s =
   modify $ \st -> st { lastState = s }
 
-getEnv :: FutharkdbM (Maybe ExportedEnv)
-getEnv = do
+getProgState :: DebuggerM (Maybe ProgramState)
+getProgState = do
   st <- get
-  return $ case lastState st of
-    Nothing -> Nothing
-    Just (_, env) -> Just env
+  return $ lastState st
 
-printLoc :: String -> FutharkdbM ()
-printLoc s =
-  handleEnv (\env ->
-    liftIO $ putStrLn (locStr (location env) ++ ": " ++ s)
-  )
-
-handleEnv :: (ExportedEnv -> FutharkdbM ()) -> FutharkdbM ()
-handleEnv cont = do
-  env <- getEnv
-  case env of
-    Nothing -> liftIO $ putStrLn "No environment is currently loaded."
-    (Just e) -> cont e
-
-handleStep :: (MonadTrans t, MonadIO (t IO), MonadState DebuggerState (t IO))
-              => (String -> ExportedEnv -> t IO ()) -> t IO ()
-handleStep cont = do
+getBreakpoints :: DebuggerM [Breakpoint]
+getBreakpoints = do
   st <- get
-  case lastState st of
+  return (breakpoints st)
+
+getStringLoc :: ExportedEnv -> DebuggerM String
+getStringLoc env =
+  return $ locStr $ location env
+
+-- returns indices of hit breakpoints
+getHitBreakpoints :: ExportedEnv -> DebuggerM [Int]
+getHitBreakpoints env = do
+  bps <- getBreakpoints
+  return $ getBrokenPoints env bps 0
+  where getBrokenPoints _ [] _ = []
+        getBrokenPoints e (b:bs) ix =
+          if checkBreakpoint e b
+          then ix : getBrokenPoints e bs (ix+1)
+          else getBrokenPoints e bs (ix+1)
+
+-- extract program state if any, call continuation on it
+handleProgState :: (DebuggerT IO [Value] -> ExportedEnv -> DebuggerM ())
+                   -> DebuggerM ()
+handleProgState cont = do
+  ps <- getProgState
+  case ps of
     Nothing -> liftIO $ putStrLn "No program is currently loaded."
-    (Just (prog, _)) -> do
-      k <- lift $ runExceptT $ stepDebuggerT prog
-      case k of
-        (Right (Right (desc, env, m'))) -> do
-          updateLastState $ Just (m', env)
-          cont desc env
-        (Right (Left res)) -> do
-          updateLastState Nothing
-          liftIO $ putStrLn ("Result: " ++ show res)
-        (Left err) -> do
-          updateLastState Nothing
-          liftIO $ putStrLn ("Error: " ++ show err)
+    (Just (p,e)) -> cont p e
+
+-- go one step in execution. if more steps and breakpoint not hit,
+-- call continuation on description and environment of next suspension.
+handleStep :: (String -> ExportedEnv -> DebuggerM ()) -> DebuggerM ()
+handleStep cont =
+  handleProgState (\prog _ -> do
+    k <- lift $ runExceptT $ stepDebuggerT prog
+    case k of
+      (Right (Right (desc, env, m'))) -> do
+        updateLastState $ Just (m', env)
+        handleHitBreakpoints desc env cont
+      (Right (Left res)) -> do
+        updateLastState Nothing
+        liftIO $ putStrLn ("Result: " ++ show res)
+      (Left err) -> do
+        updateLastState Nothing
+        liftIO $ putStrLn ("Error: " ++ show err)
+    )
+
+-- TODO: currently stops every time the breakpoint's line is hit, but there
+-- may be several steps in one line. Maybe should only break first time.
+handleHitBreakpoints :: String -> ExportedEnv
+                        -> (String -> ExportedEnv -> DebuggerM ())
+                        -> DebuggerM ()
+handleHitBreakpoints desc env cont = do
+  b <- getHitBreakpoints env
+  case b of
+    [] -> cont desc env
+    x ->
+      liftIO $ forM_ x (\ix -> do
+        putStrLn ("Breakpoint " ++ show ix ++ " hit.")
+        putStrLn (locStr (location env) ++ ": " ++ desc)
+        )
+
+checkBreakpoint :: ExportedEnv -> Breakpoint -> Bool
+checkBreakpoint env (Location _ line) =
+  let loc = location env
+      (_f, l) = getFileLine loc in
+  l == line -- && f == file  -- assume single-file for now
+  where getFileLine (SrcLoc (Loc (Pos f l _ _) _)) = (f, l)
+        getFileLine _ = ("", -1)
+checkBreakpoint _ (Function _) =
+  error "function breakpoint unimplemented"
 
 commands :: [(T.Text, (Command, T.Text))]
-commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
-            ("help", (helpCommand, [text|Print a list of commands.|])),
-            ("quit", (quitCommand, [text|Quit futharkdb.|])),
-            ("run", (runCommand, [text|Run program.|])),
-            ("step", (stepCommand, [text|Make one step in the program.|])),
-            ("read", (readCommand, [text|Read the value of a variable.|])),
-            ("next", (nextCommand, [text|Skip until same evaluation depth is reached.|]))]
+commands = [("load",  (loadCommand, [text|Load a Futhark source file.|]))
+           , ("help", (helpCommand, [text|Print a list of commands.|]))
+           , ("quit", (quitCommand, [text|Quit futharkdb.|]))
+           , ("run",  (runCommand, [text|Run program.|]))
+           , ("step", (stepCommand, [text|Make one step in the program.|]))
+           , ("read", (readCommand, [text|Read the value of a variable.|]))
+           , ("next", (nextCommand,
+                      [text|Skip until same evaluation depth is reached.|]))
+           , ("break",(breakCommand, [text|Add a breakpoint.|]))
+           , ("list", (listCommand, [text|List all breakpoints.|]))
+           ]
   where
         loadCommand :: Command
         loadCommand file = do
@@ -196,15 +250,20 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
 
         stepCommand :: Command
         stepCommand _ =
-          handleStep (\desc _ -> printLoc desc)
+          handleStep (\desc env -> do
+            loc <- getStringLoc env
+            liftIO $ putStrLn (loc ++ ": " ++ desc)
+          )
 
         nextCommand :: Command
         nextCommand _ =
-          handleEnv (\env ->
+          handleProgState (\_ env ->
             let dep = depth env
                 cont desc e =
                   if depth e == dep
-                  then printLoc desc
+                  then do
+                    loc <- getStringLoc e
+                    liftIO $ putStrLn (loc ++ ": " ++ desc)
                   else handleStep cont in
             handleStep cont
             )
@@ -215,7 +274,7 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
 
         readCommand :: Command
         readCommand var =
-          handleEnv (\env ->
+          handleProgState (\_ env ->
             if var == ""
             then -- list all
               liftIO $ forM_ (vtable env) $ \(n, val) ->
@@ -227,3 +286,26 @@ commands = [("load", (loadCommand, [text|Load a Futhark source file.|])),
                 (Just (_, v)) ->
                   liftIO $ putStrLn (pretty v)
             )
+
+        breakCommand :: Command
+        breakCommand input =
+          -- for now assume user input is a line number. assume single-file!
+          case decimal input :: Either String (Int, T.Text) of
+            Left _ -> do
+              liftIO $ T.putStr input
+              liftIO $ putStrLn " is not a line number."
+            Right (i, _) -> do
+              bps <- getBreakpoints
+              let ix = length bps
+                  newb = Location "" i in do
+                liftIO $ putStrLn ("Added breakpoint " ++ show ix ++ ": " ++ show newb)
+                modify $ \st -> st { breakpoints = breakpoints st ++ [newb] }
+
+        listCommand :: Command
+        listCommand _ = do
+          bps <- getBreakpoints
+          liftIO $ putStrLn "Breakpoints:"
+          liftIO $ foldM_ (\(ix :: Int) bp -> do
+            putStrLn (show ix ++ ": " ++ show bp)
+            return (ix+1)
+            ) 0 bps
