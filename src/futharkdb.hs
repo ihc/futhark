@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE QuasiQuotes #-}
+
 module Main (main) where
 
-import Control.Exception
+import Control.Exception(IOException, catch)
 import Data.Char
 import Data.List(find)
 import Data.Loc
-import Data.Maybe
+import Data.Maybe(listToMaybe, maybeToList)
 import Control.Monad
 import Control.Monad.State
 import Control.Monad.Except
@@ -24,12 +24,14 @@ import System.Console.GetOpt
 
 import Language.Futhark as AST
 import Language.Futhark.Core(locStr)
-import Futhark.Compiler(readProgram, reportingIOErrors, dumpError, newFutharkConfig)
+import Futhark.Compiler
 import Futhark.Debugger
 import Futhark.Pipeline(CompilerError(ExternalError))
-import Futhark.Util.Options
+import Futhark.Util.Options(FunOptDescr, mainWithOptions)
 
-{- TYPES -}
+{------------------------------------------------------------------------------}
+{- TYPES                                                                      -}
+{------------------------------------------------------------------------------}
 
 -- commandline options, not currently used
 newtype DebuggerConfig = DebuggerConfig { entryPoint :: Name }
@@ -83,7 +85,9 @@ newDebuggerState p = DebuggerState
 
 type DebuggerM = StateT DebuggerState IO
 
-{- ENTRY POINT -}
+{------------------------------------------------------------------------------}
+{- ENTRY POINT                                                                -}
+{------------------------------------------------------------------------------}
 
 {- Takes filename and entry point as commandline arguments -}
 main :: IO ()
@@ -135,24 +139,36 @@ readEvalPrint = do
         cmdf arg
       Nothing -> liftIO $ T.putStrLn $ "Unknown command '" <> cmdname <> "'"
 
-{- COMMANDS -}
+{------------------------------------------------------------------------------}
+{- COMMANDS                                                                   -}
+{------------------------------------------------------------------------------}
 
 type Command = T.Text -> DebuggerM ()
 
 commands :: [(T.Text, (Command, T.Text))]
-commands = [ ("load", (loadCommand, [text|Load a Futhark source file.|]))
-           , ("help", (helpCommand, [text|Print a list of commands.|]))
-           , ("quit", (quitCommand, [text|Quit futharkdb.|]))
-           , ("run",  (runCommand, [text|Run program.|]))
-           , ("step", (stepCommand, [text|Make one step in the program.|]))
-           , ("read", (readCommand, [text|Read the value of a variable.|]))
-           , ("next", (nextCommand,
-                      [text|Skip until same evaluation depth is reached.|]))
-           , ("break",(breakCommand, [text|Add a breakpoint.|]))
-           , ("list", (listCommand, [text|List all breakpoints.|]))
-           , ("back", (backCommand, [text|Make one step in backwards direction.|]))
+commands = [ ("help",  (helpCommand, [text|Print a list of commands.|]))
+           , ("load",  (loadCommand, [text|Load a Futhark source file.|]))
+           , ("quit",  (quitCommand, [text|Quit futharkdb.|]))
+           , ("run",   (runCommand, [text|Run program.|]))
+           , ("step",  (stepCommand, [text|Make one step in the program.|]))
+           , ("read",  (readCommand, [text|Read the value of a variable.|]))
+           , ("next",  (nextCommand,
+                       [text|Skip until same evaluation depth is reached.|]))
+           , ("break", (breakCommand, [text|Add a breakpoint.|]))
+           , ("list",  (listCommand, [text|List all breakpoints.|]))
+           , ("back",  (backCommand,
+                       [text|Make one step in backwards direction.|]))
            ]
   where
+        helpCommand :: Command
+        helpCommand _ =
+          liftIO $ forM_ commands $ \(cmd, (_, desc)) -> do
+                     T.putStrLn cmd
+                     T.putStrLn $ T.replicate (T.length cmd) "-"
+                     T.putStr desc
+                     T.putStrLn ""
+                     T.putStrLn ""
+
         loadCommand :: Command
         loadCommand file = do
           liftIO $ T.putStrLn $ "Reading file " <> file
@@ -165,15 +181,6 @@ commands = [ ("load", (loadCommand, [text|Load a Futhark source file.|]))
             Right (prog, _, _imports, _src) -> do
               liftIO $ putStrLn "Succesfully loaded."
               pushHistory $ runProgram prog defaultEntryPoint
-
-        helpCommand :: Command
-        helpCommand _ =
-          liftIO $ forM_ commands $ \(cmd, (_, desc)) -> do
-                     T.putStrLn cmd
-                     T.putStrLn $ T.replicate (T.length cmd) "-"
-                     T.putStr desc
-                     T.putStrLn ""
-                     T.putStrLn ""
 
         quitCommand :: Command
         quitCommand _ = liftIO exitSuccess
@@ -300,7 +307,7 @@ handleStep cont =
   handleProgState (\step -> do
     k <- lift $ runExceptT $ stepDebuggerT $ stepState step
     case k of
-      (Right (Right (Export desc env m'))) ->
+      (Right (Right (DebuggerExport desc env m'))) ->
         let nextStep = debuggerStep desc env m' in
         do
           pushHistory nextStep
@@ -313,6 +320,7 @@ handleStep cont =
         liftIO $ putStrLn ("Error: " ++ show err)
     )
 
+-- stop if breakpoints were hit, otherwise call continuation.
 -- TODO: currently stops every time the breakpoint's line is hit, but there
 -- may be several steps in one line. Maybe should only break first time.
 handleHitBreakpoints :: DebuggerStep -> (DebuggerStep -> DebuggerM ())
@@ -327,6 +335,7 @@ handleHitBreakpoints step cont = do
         print step
         )
 
+-- return true if breakpoint was hit
 checkBreakpoint :: DebuggerEnv IO -> Breakpoint -> Bool
 checkBreakpoint env (Location _ line) =
   let (_f, l) = getFileLine $ dbLocation env in
