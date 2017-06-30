@@ -51,10 +51,17 @@ debuggerT = DebuggerT
 type DebuggerT m = BaseDebuggerT (DebuggerExport m) (ExceptT DebuggerError m)
 
 -- error type for interpreter errors
-data DebuggerError = Generic String
+data DebuggerError =
+    Generic String
+  | Unimplemented String
 
 instance Show DebuggerError where
   show (Generic s) = s
+  show (Unimplemented s) = "Unimplemented: " ++ s
+
+-- temporary, until stuff starts not being unimplemented
+unimp :: Monad m => String -> DebuggerT m a
+unimp s = throwError $ Unimplemented s
 
 instance Monad m => MonadError DebuggerError (DebuggerT m) where
   throwError e = debuggerT $ throwError e
@@ -91,6 +98,10 @@ data DebuggerEnv m = DebuggerEnv { dbVtable :: VTable
                                  , dbDepth :: Int
                                  , dbLocation :: SrcLoc
                                  }
+
+-- used for debugging ... of the debugger!
+instance Show (DebuggerEnv m) where
+  show d = concatMap (show . fst) (dbVtable d)
 
 newDebuggerEnv :: Monad m => FunTable m -> DebuggerEnv m
 newDebuggerEnv ftable =
@@ -143,8 +154,8 @@ getBinOp vname x y =
     ("+", PrimValue (SignedValue a), PrimValue (SignedValue b)) ->
         let (c,d) = (valueIntegral a, valueIntegral b) :: (Int, Int) in
         PrimValue $ SignedValue $ intValue Int32 (c + d)
-    (_, _, _) ->
-        error "Debugger error: UNIMPLEMENTED"
+    (op, _, _) ->
+        error $ "Debugger error: unimplemented binop (" ++ op ++ ")"
 
 {------------------------------------------------------------------------------}
 {- INTERPRETER                                                                -}
@@ -158,10 +169,25 @@ evalExp body ev =
 
     Parens e _ -> evalExp e env
 
-    Var name _ _ ->
+    TupLit _e _ ->
+      unimp "tuple lit"
+
+    RecordLit _fe _ ->
+      unimp "record lit"
+
+    ArrayLit _es _type _ ->
+      unimp "array lit"
+
+    Empty _typedecl _ ->
+      unimp "empty"
+
+    Var name _comptypebase _ ->
       do
         val <- lookupVar (qualLeaf name) env
         return [val]
+
+    Ascript _e _typedecl _ ->
+      unimp "ascript"
 
     LetPat _ pat val e _ ->
       let vname = getPatternName pat in -- assume just one for now
@@ -170,6 +196,21 @@ evalExp body ev =
         step env ("Binding variable \"" ++ baseString vname
                   ++ "\" to " ++ show (pretty v))
           $ evalExp e $ bindVar (getPatternName pat) v env
+
+    LetFun _vname (_paramtypes, _patterns, _rettypeexp, _structtyp, _exp) _body _ ->
+      unimp "let function expression"
+
+    If cond _t _e _compty _ ->
+      unimp "if"
+
+    Apply _qualname _params _compty _ ->
+      unimp "apply"
+
+    Negate _e _ ->
+      unimp "numeric negation"
+
+    DoLoop _types _mergepat _initval _looptype _body _ ->
+      unimp "do loop"
 
     BinOp name (e1,_) (e2,_) _ _ ->
       let bname = qualLeaf name
