@@ -29,6 +29,7 @@ module Futhark.Optimise.Simplifier.Engine
 
        , addStmEngine
        , collectStmsEngine
+       , collectCerts
        , Env (envHoistBlockers, envRules)
        , emptyEnv
        , HoistBlockers(..)
@@ -108,11 +109,12 @@ type NeedSet lore = [Stm lore]
 
 data Need lore = Need { needStms :: NeedSet lore
                       , usageTable  :: UT.UsageTable
+                      , needCerts :: !Certificates
                       }
 
 instance Monoid (Need lore) where
-  Need b1 f1 `mappend` Need b2 f2 = Need (b1 <> b2) (f1 <> f2)
-  mempty = Need [] UT.empty
+  Need b1 f1 c1 `mappend` Need b2 f2 c2 = Need (b1 <> b2) (f1 <> f2) (c1 <> c2)
+  mempty = Need [] UT.empty mempty
 
 data HoistBlockers m = HoistBlockers
                        { blockHoistPar :: BlockPred (Lore m)
@@ -216,6 +218,8 @@ instance SimplifiableLore lore => MonadBinder (SimpleM lore) where
 
   addStm      = addStmEngine
   collectStms = collectStmsEngine
+  certifying cs =
+    censor (\need -> need { needStms = fmap (certify cs) (needStms need) })
 
 runSimpleM :: SimpleM lore a
            -> SimpleOps lore
@@ -231,7 +235,8 @@ subSimpleM :: (SimplifiableLore lore,
                SameScope outerlore lore,
                ExpAttr outerlore ~ ExpAttr lore,
                BodyAttr outerlore ~ BodyAttr lore,
-               RetType outerlore ~ RetType lore) =>
+               RetType outerlore ~ RetType lore,
+               BranchType outerlore ~ BranchType lore) =>
               SimpleOps lore
            -> Env (SimpleM lore)
            -> ST.SymbolTable (Wise outerlore)
@@ -261,9 +266,9 @@ passNeed = pass
 addStmEngine :: SimplifiableLore lore => Stm (Wise lore) -> SimpleM lore ()
 addStmEngine bnd = do
   modifyVtable $ ST.insertStm bnd
-  case bindingExp bnd of
-    BasicOp (Assert se _) -> asserted se
-    _                    -> return ()
+  case stmExp bnd of
+    BasicOp (Assert se _ _) -> asserted se
+    _                       -> return ()
   needStm bnd
 
 collectStmsEngine :: SimpleM lore a -> SimpleM lore (a, [Stm (Wise lore)])
@@ -271,6 +276,12 @@ collectStmsEngine m = passNeed $ do
   (x, need) <- listenNeed m
   return ((x, needStms need),
           const mempty)
+
+collectCerts :: SimpleM lore a -> SimpleM lore (a, Certificates)
+collectCerts m = passNeed $ do
+  (x, need) <- listenNeed m
+  return ((x, needCerts need),
+          const need { needCerts = mempty })
 
 asksEngineEnv :: (Env (SimpleM lore) -> a) -> SimpleM lore a
 asksEngineEnv f = f <$> askEngineEnv
@@ -289,34 +300,37 @@ changed = modifyEngineState $ \s -> s { stateChanged = True }
 
 
 needStm :: Stm (Wise lore) -> SimpleM lore ()
-needStm bnd = tellNeed $ Need [bnd] UT.empty
+needStm bnd = tellNeed mempty { needStms = [bnd] }
+
+usedCerts :: Certificates -> SimpleM lore ()
+usedCerts cs = tellNeed mempty { needCerts = cs }
 
 boundFree :: Names -> SimpleM lore ()
-boundFree fs = tellNeed $ Need [] $ UT.usages fs
+boundFree fs = tellNeed mempty { usageTable = UT.usages fs }
 
 usedName :: VName -> SimpleM lore ()
 usedName = boundFree . S.singleton
 
 -- | Register the fact that the given name is consumed.
 consumedName :: VName -> SimpleM lore ()
-consumedName = tellNeed . Need [] . UT.consumedUsage
+consumedName v = tellNeed mempty { usageTable = UT.consumedUsage v }
 
 inResultName :: VName -> SimpleM lore ()
-inResultName = tellNeed . Need [] . UT.inResultUsage
+inResultName v = tellNeed mempty { usageTable = UT.inResultUsage v }
 
 asserted :: SubExp -> SimpleM lore ()
 asserted Constant{} =
   return ()
 asserted (Var name) = do
   se <- ST.lookupExp name <$> getVtable
-  case se of Just (BasicOp (CmpOp CmpEq{} x y)) -> do
+  case se of Just (BasicOp (CmpOp CmpEq{} x y), _) -> do
                case x of Var xvar ->
-                           tellNeed $ Need [] $
-                           UT.equalToUsage xvar y
+                           tellNeed $
+                           mempty { usageTable = UT.equalToUsage xvar y }
                          _ -> return ()
                case y of Var yvar ->
-                           tellNeed $ Need [] $
-                           UT.equalToUsage yvar x
+                           tellNeed $
+                           mempty { usageTable = UT.equalToUsage yvar x }
                          _ -> return ()
              _ -> return ()
 
@@ -390,6 +404,61 @@ bindLoopVar var it bound =
         clampUpper = case bound of Var v -> ST.isAtLeast v 1
                                    _     -> id
 
+-- | We are willing to hoist potentially unsafe statements out of
+-- loops, but they most be protected by adding a branch on top of
+-- them.
+protectLoopHoisted :: SimplifiableLore lore =>
+                      [(FParam (Wise lore),SubExp)]
+                   -> [(FParam (Wise lore),SubExp)]
+                   -> LoopForm (Wise lore)
+                   -> SimpleM lore a -> SimpleM lore a
+protectLoopHoisted ctx val form m = do
+  (x, stms) <- collectStms m
+  if any (not . safeExp . stmExp) stms
+    then do is_nonempty <- checkIfNonEmpty
+            mapM_ (protectUnsafe is_nonempty) stms
+    else mapM_ addStm stms
+  return x
+  where checkIfNonEmpty =
+          case form of
+            WhileLoop cond
+              | Just (_, cond_init) <-
+                  find ((==cond) . paramName . fst) $ ctx ++ val ->
+                    return cond_init
+              | otherwise -> return $ constant True -- infinite loop
+            ForLoop _ it bound _ ->
+              letSubExp "loop_nonempty" $
+              BasicOp $ CmpOp (CmpSlt it) (intConst it 0) bound
+
+        protectUnsafe is_nonempty (Let pat (StmAux cs _) e)
+          | not $ safeExp e = do
+              nonempty_body <- eBody [pure e]
+              empty_body <- eBody $ map (emptyOfType $ patternContextNames pat)
+                                        (patternValueTypes pat)
+              if_ts <- expTypesFromPattern pat
+              certifying cs $
+                letBind_ pat $ If is_nonempty nonempty_body empty_body $
+                IfAttr if_ts IfFallback
+        protectUnsafe _ stm =
+          addStm stm
+
+        emptyOfType _ Mem{} =
+          fail "protectLoopHoisted: Cannot hoist non-existential memory."
+        emptyOfType _ (Prim pt) =
+          return $ BasicOp $ SubExp $ Constant $ blankPrimValue pt
+        emptyOfType ctx_names (Array pt shape _) = do
+          let dims = map zeroIfContext $ shapeDims shape
+          return $ BasicOp $ Scratch pt dims
+          where zeroIfContext (Var v) | v `elem` ctx_names = intConst Int32 0
+                zeroIfContext se = se
+
+-- | Statements that are not worth hoisting out of loops, because they
+-- are unsafe, and added safety (by 'protectLoopHoisted') may inhibit
+-- further optimisation..
+notWorthHoisting :: Attributes lore => BlockPred lore
+notWorthHoisting _ (Let pat _ e) =
+  not (safeExp e) && any (>0) (map arrayRank $ patternTypes pat)
+
 hoistStms :: SimplifiableLore lore =>
              RuleBook (SimpleM lore) -> BlockPred (Wise lore)
           -> ST.SymbolTable (Wise lore) -> UT.UsageTable
@@ -444,7 +513,7 @@ blockUnhoistedDeps = snd . mapAccumL block S.empty
             (blocked, Right need)
 
 provides :: Stm lore -> [VName]
-provides = patternNames . bindingPattern
+provides = patternNames . stmPattern
 
 requires :: Attributes lore => Stm lore -> Names
 requires = freeInStm
@@ -452,7 +521,7 @@ requires = freeInStm
 expandUsage :: (Attributes lore, Aliased lore, UsageInOp (Op lore)) =>
                UT.UsageTable -> Stm lore -> UT.UsageTable
 expandUsage utable bnd = utable <> usageInStm bnd <> usageThroughAliases
-  where pat = bindingPattern bnd
+  where pat = stmPattern bnd
         usageThroughAliases =
           mconcat $ mapMaybe usageThroughBindeeAliases $
           zip (patternNames pat) (patternAliases pat)
@@ -475,7 +544,7 @@ orIf :: BlockPred lore -> BlockPred lore -> BlockPred lore
 orIf p1 p2 body need = p1 body need || p2 body need
 
 isConsumed :: BlockPred lore
-isConsumed utable = any (`UT.isConsumed` utable) . patternNames . bindingPattern
+isConsumed utable = any (`UT.isConsumed` utable) . patternNames . stmPattern
 
 isOp :: BlockPred lore
 isOp _ (Let _ _ Op{}) = True
@@ -492,9 +561,9 @@ blockIf block m = passNeed $ do
     hoistStms rules block vtable (usageTable needs) (needStms needs)
   putVtable $ foldl (flip ST.insertStm) vtable hoistable
   return ((x, hoisted),
-          const Need { needStms = hoistable
-                     , usageTable  = usages
-                     })
+          const mempty { needStms = hoistable
+                       , usageTable  = usages
+                       })
 
 insertAllStms :: SimplifiableLore lore =>
                  SimpleM lore Result -> SimpleM lore (Body (Wise lore))
@@ -504,15 +573,15 @@ hasFree :: Attributes lore => Names -> BlockPred lore
 hasFree ks _ need = ks `intersects` requires need
 
 isNotSafe :: Attributes lore => BlockPred lore
-isNotSafe _ = not . safeExp . bindingExp
+isNotSafe _ = not . safeExp . stmExp
 
 isInPlaceBound :: BlockPred m
 isInPlaceBound _ = not . all ((==BindVar) . patElemBindage) .
-                   patternElements . bindingPattern
+                   patternElements . stmPattern
 
 isNotCheap :: Attributes lore => BlockPred lore
 isNotCheap _ = not . cheapBnd
-  where cheapBnd = cheap . bindingExp
+  where cheapBnd = cheap . stmExp
         cheap (BasicOp BinOp{})   = True
         cheap (BasicOp SubExp{})  = True
         cheap (BasicOp UnOp{})    = True
@@ -541,7 +610,7 @@ hoistCommon m1 vtablef1 m2 vtablef2 = passNeed $ do
       -- "isNotHoistableBnd hoistbl_nms" ensures that only the (transitive closure)
       -- of the bindings used for allocations and shape computations are if-hoistable.
       block = isNotSafe `orIf` isNotCheap `orIf` isInPlaceBound `orIf`
-                isNotHoistableBnd hoistbl_nms
+              isNotHoistableBnd hoistbl_nms
   vtable <- getVtable
   rules <- asksEngineEnv envRules
   (body1_bnds', safe1, f1) <-
@@ -557,25 +626,25 @@ hoistCommon m1 vtablef1 m2 vtablef2 = passNeed $ do
   body1' <- mkBodyM body1_bnds' res1
   body2' <- mkBodyM body2_bnds' res2
   return ((body1', body2'),
-          const Need { needStms = hoistable
-                     , usageTable = f1 <> f2
-                     })
+          const mempty { needStms = hoistable
+                       , usageTable = f1 <> f2
+                       })
   where filterBnds is_alloc_fn getArrSz_fn all_bnds =
           let sz_nms     = mconcat $ map getArrSz_fn all_bnds
               sz_needs   = transClosSizes all_bnds sz_nms []
               alloc_bnds = filter is_alloc_fn all_bnds
               sel_nms    = S.fromList $
-                           concatMap (patternNames . bindingPattern)
+                           concatMap (patternNames . stmPattern)
                                      (sz_needs ++ alloc_bnds)
           in  sel_nms
         transClosSizes all_bnds scal_nms hoist_bnds =
           let new_bnds = filter (hasPatName scal_nms) all_bnds
-              new_nms  = mconcat $ map (freeInExp . bindingExp) new_bnds
+              new_nms  = mconcat $ map (freeInExp . stmExp) new_bnds
           in  if null new_bnds
               then hoist_bnds
               else transClosSizes all_bnds new_nms (new_bnds ++ hoist_bnds)
         hasPatName nms bnd = intersects nms $ S.fromList $
-                             patternNames $ bindingPattern bnd
+                             patternNames $ stmPattern bnd
         isNotHoistableBnd :: Names -> BlockPred m
         isNotHoistableBnd nms _ bnd = not $ hasPatName nms bnd
 
@@ -590,9 +659,25 @@ simplifyBody ds (Body _ bnds res) = do
 simplifyResult :: SimplifiableLore lore =>
                   [Diet] -> Result -> SimpleM lore Result
 simplifyResult ds es = do
-  es' <- mapM simplify es
+  -- Use a special copy propagation function to avoid copy propagation
+  -- when certificates are involved - there is nowhere to put them!
+  es' <- mapM simplify' es
   consumeResult $ zip ds es'
   return es'
+  where simplify' (Var name) = do
+          bnd <- getsEngineState $ ST.lookupSubExp name . stateVtable
+          case bnd of
+            Just (Constant v, cs)
+              | cs == mempty -> do changed
+                                   return $ Constant v
+            Just (Var id', cs)
+              | cs == mempty -> do changed
+                                   usedName id'
+                                   return $ Var id'
+            _              -> do usedName name
+                                 return $ Var name
+        simplify' (Constant v) =
+          return $ Constant v
 
 isDoLoopResult :: Result -> SimpleM lore ()
 isDoLoopResult = mapM_ checkForVar
@@ -605,10 +690,11 @@ isDoLoopResult = mapM_ checkForVar
 simplifyStm :: SimplifiableLore lore =>
                Stm lore -> SimpleM lore ()
 
-simplifyStm (Let pat _ e) = do
-  e' <- simplifyExp e
-  pat' <- simplifyPattern pat
-  inspectStm =<<
+simplifyStm (Let pat (StmAux stm_cs _) e) = do
+  stm_cs' <- simplify stm_cs
+  (e', e_cs) <- collectCerts $ simplifyExp e
+  (pat', pat_cs) <- collectCerts $ simplifyPattern pat
+  inspectStm . certify (stm_cs'<>e_cs<>pat_cs) =<<
     mkLetM (addWisdomToPattern pat' e') e'
 
 inspectStm :: SimplifiableLore lore => Stm (Wise lore) -> SimpleM lore ()
@@ -626,17 +712,17 @@ simplifyOp op = do f <- asks $ simplifyOpS . fst
 
 simplifyExp :: SimplifiableLore lore => Exp lore -> SimpleM lore (Exp (Wise lore))
 
-simplifyExp (If cond tbranch fbranch ts) = do
+simplifyExp (If cond tbranch fbranch (IfAttr ts ifsort)) = do
   -- Here, we have to check whether 'cond' puts a bound on some free
   -- variable, and if so, chomp it.  We should also try to do CSE
   -- across branches.
   cond' <- simplify cond
   ts' <- mapM simplify ts
-  let ds = map (const Observe) ts'
+  let ds = map (const Observe) (bodyResult tbranch)
   (tbranch',fbranch') <-
     hoistCommon (simplifyBody ds tbranch) (ST.updateBounds True cond)
                 (simplifyBody ds fbranch) (ST.updateBounds False cond)
-  return $ If cond' tbranch' fbranch' ts'
+  return $ If cond' tbranch' fbranch' $ IfAttr ts' ifsort
 
 simplifyExp (DoLoop ctx val form loopbody) = do
   let (ctxparams, ctxinit) = unzip ctx
@@ -654,21 +740,24 @@ simplifyExp (DoLoop ctx val form loopbody) = do
       let (loop_params, loop_arrs) = unzip loopvars
       loop_params' <- mapM (simplifyParam simplify) loop_params
       loop_arrs' <- mapM simplify loop_arrs
-      return (ForLoop loopvar it boundexp' (zip loop_params' loop_arrs'),
+      let form' = ForLoop loopvar it boundexp' (zip loop_params' loop_arrs')
+      return (form',
               S.fromList (loopvar : map paramName loop_params') <> fparamnames,
               bindLoopVar loopvar it boundexp' .
-              bindArrayLParams (zip loop_params' $ map Just loop_arrs'))
+              protectLoopHoisted ctx' val' form' .
+              bindArrayLParams (zip loop_params' (map Just loop_arrs')))
     WhileLoop cond -> do
       cond' <- simplify cond
       return (WhileLoop cond',
               fparamnames,
-              id)
+              protectLoopHoisted ctx' val' (WhileLoop cond'))
   seq_blocker <- asksEngineEnv $ blockHoistSeq . envHoistBlockers
   (loopres', loopbnds') <-
     enterLoop $
     bindFParams (ctxparams'++valparams') $ wrapbody $
     blockIf
-    (hasFree boundnames `orIf` isConsumed `orIf` seq_blocker `orIf` isNotSafe) $ do
+    (hasFree boundnames `orIf` isConsumed
+     `orIf` seq_blocker `orIf` notWorthHoisting) $ do
       res <- simplifyBody diets loopbody
       isDoLoopResult res
       return res
@@ -693,6 +782,7 @@ simplifyExpBase = mapExpM hoist
                 , mapOnVName = simplify
                 , mapOnCertificates = simplify
                 , mapOnRetType = simplify
+                , mapOnBranchType = simplify
                 , mapOnFParam =
                   fail "Unhandled FParam in simplification engine."
                 , mapOnLParam =
@@ -706,6 +796,7 @@ type SimplifiableLore lore = (Attributes lore,
                               Simplifiable (FParamAttr lore),
                               Simplifiable (LParamAttr lore),
                               Simplifiable (RetType lore),
+                              Simplifiable (BranchType lore),
                               CanBeWise (Op lore),
                               ST.IndexOp (OpWithWisdom (Op lore)),
                               BinderOps lore)
@@ -723,22 +814,24 @@ instance Simplifiable a => Simplifiable (Maybe a) where
   simplify Nothing = return Nothing
   simplify (Just x) = Just <$> simplify x
 
+instance Simplifiable a => Simplifiable [a] where
+  simplify = mapM simplify
+
 instance Simplifiable SubExp where
   simplify (Var name) = do
     bnd <- getsEngineState $ ST.lookupSubExp name . stateVtable
     case bnd of
-      Just (Constant v) -> do changed
-                              return $ Constant v
-      Just (Var id') -> do changed
-                           usedName id'
-                           return $ Var id'
+      Just (Constant v, cs) -> do changed
+                                  usedCerts cs
+                                  return $ Constant v
+      Just (Var id', cs) -> do changed
+                               usedName id'
+                               usedCerts cs
+                               return $ Var id'
       _              -> do usedName name
                            return $ Var name
   simplify (Constant v) =
     return $ Constant v
-
-instance Simplifiable ExtRetType where
-  simplify = fmap ExtRetType . mapM simplify . retTypeValues
 
 simplifyPattern :: (SimplifiableLore lore, Simplifiable attr) =>
                    PatternT attr
@@ -755,11 +848,8 @@ simplifyPattern pat =
 instance Simplifiable Bindage where
   simplify BindVar =
     return BindVar
-  simplify (BindInPlace cs src is) =
-    BindInPlace <$>
-    simplify cs <*>
-    simplify src <*>
-    mapM simplify is
+  simplify (BindInPlace src is) =
+    BindInPlace <$> simplify src <*> simplify is
 
 simplifyParam :: (attr -> SimpleM lore attr) -> ParamT attr -> SimpleM lore (ParamT attr)
 simplifyParam simplifyAttribute (Param name attr) = do
@@ -770,27 +860,24 @@ instance Simplifiable VName where
   simplify v = do
     se <- ST.lookupSubExp v <$> getVtable
     case se of
-      Just (Var v') -> do changed
-                          usedName v'
-                          return v'
+      Just (Var v', cs) -> do changed
+                              usedName v'
+                              usedCerts cs
+                              return v'
       _             -> do usedName v
                           return v
 
-instance Simplifiable (TypeBase ExtShape u) where
-  simplify t = do shape <- simplify $ arrayShape t
-                  return $ t `setArrayShape` shape
+instance Simplifiable d => Simplifiable (ShapeBase d) where
+  simplify = fmap Shape . simplify . shapeDims
 
-instance Simplifiable ExtShape where
-  simplify = fmap ExtShape . mapM simplify . extShapeDims
-
-instance Simplifiable ExtDimSize where
+instance Simplifiable ExtSize where
   simplify (Free se) = Free <$> simplify se
   simplify (Ext x)   = return $ Ext x
 
-instance Simplifiable (TypeBase Shape u) where
+instance Simplifiable shape => Simplifiable (TypeBase shape u) where
   simplify (Array et shape u) = do
-    dims <- mapM simplify $ shapeDims shape
-    return $ Array et (Shape dims) u
+    shape' <- simplify shape
+    return $ Array et shape' u
   simplify (Mem size space) =
     Mem <$> simplify size <*> pure space
   simplify (Prim bt) =
@@ -836,7 +923,7 @@ simplifyLambdaMaybeHoist blocked lam@(Lambda params body rettype) nes arrs = do
     blockIf (blocked `orIf` hasFree paramnames `orIf` isConsumed) $
       simplifyBody (map (const Observe) rettype) body
   body' <- mkBodyM body_bnds' body_res'
-  rettype' <- mapM simplify rettype
+  rettype' <- simplify rettype
   let consumed_in_body = consumedInBody body'
       paramWasConsumed p (Just (Var arr))
         | p `S.member` consumed_in_body = consumedName arr
@@ -859,7 +946,7 @@ simplifyExtLambda :: SimplifiableLore lore =>
 simplifyExtLambda lam@(ExtLambda params body rettype) nes parbnds = do
   params' <- mapM (simplifyParam simplify) params
   let paramnames = S.fromList $ boundByExtLambda lam
-  rettype' <- mapM simplify rettype
+  rettype' <- simplify rettype
   par_blocker <- asksEngineEnv $ blockHoistPar . envHoistBlockers
   (body_res', body_bnds') <-
     enterLoop $
@@ -890,19 +977,20 @@ consumeResult = mapM_ inspect
         inspect (Observe, _) = return ()
 
 instance Simplifiable Certificates where
-  simplify = fmap (nub . concat) . mapM check
+  simplify (Certificates ocs) = Certificates . nub . concat <$> mapM check ocs
     where check idd = do
             vv <- getsEngineState $ ST.lookupSubExp idd . stateVtable
             case vv of
-              Just (Constant Checked) -> return []
-              Just (Var idd') -> do usedName idd'
-                                    return [idd']
+              Just (Constant Checked, Certificates cs) -> return cs
+              Just (Var idd', _) -> do usedName idd'
+                                       return [idd']
               _ -> do usedName idd
                       return [idd]
 
 simplifyFun :: SimplifiableLore lore => FunDef lore -> SimpleM lore (FunDef (Wise lore))
 simplifyFun (FunDef entry fname rettype params body) = do
   rettype' <- simplify rettype
-  body' <- bindFParams params $ insertAllStms $
-           simplifyBody (map diet $ retTypeValues rettype') body
+  let ds = replicate (length (bodyResult body) - length rettype) Observe ++
+           map diet (retTypeValues rettype')
+  body' <- bindFParams params $ insertAllStms $ simplifyBody ds body
   return $ FunDef entry fname rettype' params body'

@@ -12,9 +12,6 @@ module Futhark.Representation.AST.Syntax
   -- * Types
   , Uniqueness(..)
   , NoUniqueness(..)
-  , Shape(..)
-  , ExtDimSize(..)
-  , ExtShape(..)
   , Rank(..)
   , ArrayShape(..)
   , Space (..)
@@ -33,6 +30,7 @@ module Futhark.Representation.AST.Syntax
   , PatElemT (..)
   , PatternT (..)
   , Pattern
+  , StmAux(..)
   , Stm(..)
   , Result
   , BodyT(..)
@@ -47,6 +45,9 @@ module Futhark.Representation.AST.Syntax
   , ExpT(..)
   , Exp
   , LoopForm (..)
+  , IfAttr (..)
+  , IfSort (..)
+  , Safety (..)
   , LambdaT(..)
   , Lambda
   , ExtLambdaT (..)
@@ -96,10 +97,16 @@ instance Monoid (PatternT lore) where
 -- | A type alias for namespace control.
 type Pattern lore = PatternT (LetAttr lore)
 
+-- | Auxilliary Information associated with a statement.
+data StmAux attr = StmAux { stmAuxCerts :: !Certificates
+                          , stmAuxAttr :: attr
+                          }
+                  deriving (Ord, Show, Eq)
+
 -- | A local variable binding.
-data Stm lore = Let { bindingPattern :: Pattern lore
-                    , bindingLore :: ExpAttr lore
-                    , bindingExp :: Exp lore
+data Stm lore = Let { stmPattern :: Pattern lore
+                    , stmAux :: StmAux (ExpAttr lore)
+                    , stmExp :: Exp lore
                     }
 
 deriving instance Annotations lore => Ord (Stm lore)
@@ -111,7 +118,7 @@ type Result = [SubExp]
 
 -- | A body consists of a number of bindings, terminating in a result
 -- (essentially a tuple literal).
-data BodyT lore = Body { bodyLore :: BodyAttr lore
+data BodyT lore = Body { bodyAttr :: BodyAttr lore
                        , bodyStms :: [Stm lore]
                        , bodyResult :: Result
                        }
@@ -164,7 +171,7 @@ data BasicOp lore
 
   | ArrayLit  [SubExp] Type
     -- ^ Array literals, e.g., @[ [1+x, 3], [2, 1+4] ]@.
-    -- Second arg is the element type of of the rows of the array.
+    -- Second arg is the element type of the rows of the array.
     -- Scalar operations
 
   | UnOp UnOp SubExp
@@ -179,24 +186,22 @@ data BasicOp lore
   | ConvOp ConvOp SubExp
     -- ^ Conversion "casting".
 
-  | Assert SubExp SrcLoc
-  -- ^ Turn a boolean into a certificate, halting the
-  -- program if the boolean is false.
+  | Assert SubExp String (SrcLoc, [SrcLoc])
+  -- ^ Turn a boolean into a certificate, halting the program with the
+  -- given error message if the boolean is false.
 
   -- Primitive array operations
 
-  | Index Certificates VName (Slice SubExp)
-  -- ^ 1st arg are (optional) certificates for bounds
-  -- checking.  If given (even as an empty list), no
-  -- run-time bounds checking is done.
+  | Index VName (Slice SubExp)
+  -- ^ The certificates for bounds-checking are part of the 'Stm'.
 
-  | Split Certificates Int [SubExp] VName
-  -- ^ 3rd arg is sizes of arrays you get back, which is
+  | Split Int [SubExp] VName
+  -- ^ 2nd arg is sizes of arrays you get back, which is
   -- different from what the external language does.
   -- In the core language,
   -- @a = [1,2,3,4]; split@0( (1,0,2) , a ) = {[1], [], [2,3]}@
 
-  | Concat Certificates Int VName [VName] SubExp
+  | Concat Int VName [VName] SubExp
   -- ^ @concat@0([1],[2, 3, 4]) = [1, 2, 3, 4]@.
 
   | Copy VName
@@ -228,21 +233,21 @@ data BasicOp lore
   -- ^ Create array of given type and shape, with undefined elements.
 
   -- Array index space transformation.
-  | Reshape Certificates (ShapeChange SubExp) VName
+  | Reshape (ShapeChange SubExp) VName
    -- ^ 1st arg is the new shape, 2nd arg is the input array *)
 
-  | Rearrange Certificates [Int] VName
+  | Rearrange [Int] VName
   -- ^ Permute the dimensions of the input array.  The list
   -- of integers is a list of dimensions (0-indexed), which
   -- must be a permutation of @[0,n-1]@, where @n@ is the
   -- number of dimensions in the input array.
 
-  | Rotate Certificates [SubExp] VName
+  | Rotate [SubExp] VName
   -- ^ Rotate the dimensions of the input array.  The list of
   -- subexpressions specify how much each dimension is rotated.  The
   -- length of this list must be equal to the rank of the array.
 
-  | Partition Certificates Int VName [VName]
+  | Partition Int VName [VName]
     -- ^ First variable is the flag array, second is the element
     -- arrays.  If no arrays are given, the returned offsets are zero,
     -- and no arrays are returned.
@@ -255,9 +260,9 @@ data ExpT lore
   = BasicOp (BasicOp lore)
     -- ^ A simple (non-recursive) operation.
 
-  | Apply  Name [(SubExp, Diet)] (RetType lore)
+  | Apply  Name [(SubExp, Diet)] [RetType lore] (Safety, SrcLoc, [SrcLoc])
 
-  | If     SubExp (BodyT lore) (BodyT lore) [ExtType]
+  | If     SubExp (BodyT lore) (BodyT lore) (IfAttr (BranchType lore))
 
   | DoLoop [(FParam lore, SubExp)] [(FParam lore, SubExp)] (LoopForm lore) (BodyT lore)
     -- ^ @loop {a} = {v} (for i < n|while b) do b@.  The merge
@@ -269,6 +274,13 @@ deriving instance Annotations lore => Eq (ExpT lore)
 deriving instance Annotations lore => Show (ExpT lore)
 deriving instance Annotations lore => Ord (ExpT lore)
 
+-- | Whether something is safe or unsafe (mostly function calls, and
+-- in the context of whether operations are dynamically checked).
+-- When we inline an 'Unsafe' function, we remove all safety checks in
+-- its body.  The 'Ord' instance picks 'Unsafe' as being less than
+-- 'Safe'.
+data Safety = Unsafe | Safe deriving (Eq, Ord, Show)
+
 -- | For-loop or while-loop?
 data LoopForm lore = ForLoop VName IntType SubExp [(LParam lore,VName)]
                    | WhileLoop VName
@@ -276,6 +288,22 @@ data LoopForm lore = ForLoop VName IntType SubExp [(LParam lore,VName)]
 deriving instance Annotations lore => Eq (LoopForm lore)
 deriving instance Annotations lore => Show (LoopForm lore)
 deriving instance Annotations lore => Ord (LoopForm lore)
+
+-- | Data associated with a branch.
+data IfAttr rt = IfAttr { ifReturns :: [rt]
+                        , ifSort :: IfSort
+                        }
+                 deriving (Eq, Show, Ord)
+
+data IfSort = IfNormal -- ^ An ordinary branch.
+            | IfFallback -- ^ A branch where the "true" case is what
+                         -- we are actually interested in, and the
+                         -- "false" case is only present as a fallback
+                         -- for when the true case cannot be safely
+                         -- evaluated.  the compiler is permitted to
+                         -- optimise away the branch if the true case
+                         -- contains only safe statements.
+            deriving (Eq, Show, Ord)
 
 -- | A type alias for namespace control.
 type Exp = ExpT
@@ -317,7 +345,7 @@ data FunDefT lore = FunDef { funDefEntryPoint :: Maybe EntryPoint
                              -- ^ Contains a value if this function is
                              -- an entry point.
                            , funDefName :: Name
-                           , funDefRetType :: RetType lore
+                           , funDefRetType :: [RetType lore]
                            , funDefParams :: [FParam lore]
                            , funDefBody :: BodyT lore
                            }

@@ -6,10 +6,10 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Futhark.Representation.Kernels.Kernel
        ( Kernel(..)
+       , kernelType
        , KernelDebugHints(..)
        , KernelBody(..)
        , KernelSpace(..)
@@ -18,6 +18,7 @@ module Futhark.Representation.Kernels.Kernel
        , scopeOfKernelSpace
        , WhichThreads(..)
        , KernelResult(..)
+       , kernelResultSubExp
 
        , chunkedKernelNonconcatOutputs
 
@@ -27,23 +28,23 @@ module Futhark.Representation.Kernels.Kernel
        , KernelMapper(..)
        , identityKernelMapper
        , mapKernelM
+       , KernelWalker(..)
+       , identityKernelWalker
+       , walkKernelM
        )
        where
 
-import Control.Applicative
 import Control.Monad.Writer hiding (mapM_)
 import Control.Monad.Identity hiding (mapM_)
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
 import Data.List
-import Data.Foldable (mapM_) -- for stack LTS 1.15
-
-import Prelude hiding (mapM_)
 
 import Futhark.Representation.AST
 import qualified Futhark.Analysis.Alias as Alias
 import qualified Futhark.Analysis.UsageTable as UT
 import qualified Futhark.Analysis.SymbolTable as ST
+import Futhark.Analysis.PrimExp.Convert
 import qualified Futhark.Util.Pretty as PP
 import Futhark.Util.Pretty
   ((</>), (<+>), ppr, commasep, Pretty, parens, text)
@@ -62,6 +63,7 @@ import qualified Futhark.TypeCheck as TC
 import Futhark.Analysis.Metrics
 import Futhark.Tools (partitionChunkedKernelLambdaParameters)
 import qualified Futhark.Analysis.Range as Range
+import Futhark.Util (maybeNth)
 
 -- | Some information about what goes into a kernel, and where it came
 -- from.  Has no semantic meaning; only used for debugging generated
@@ -81,7 +83,6 @@ data Kernel lore =
   | SufficientParallelism SubExp -- ^ True if enough parallelism.
 
   | Kernel KernelDebugHints
-    Certificates
     KernelSpace
     [Type]
     (KernelBody lore)
@@ -134,9 +135,9 @@ deriving instance Annotations lore => Eq (KernelBody lore)
 
 data KernelResult = ThreadsReturn WhichThreads SubExp
                   | WriteReturn
-                    SubExp -- Size of array
+                    [SubExp] -- Size of array.  Must match number of dims.
                     VName -- Which array
-                    SubExp -- The index
+                    [SubExp] -- The indexes
                     SubExp -- The value
                   | ConcatReturns
                     SplitOrdering -- Permuted?
@@ -165,7 +166,6 @@ data KernelMapper flore tlore m = KernelMapper {
   , mapOnKernelLambda :: Lambda flore -> m (Lambda tlore)
   , mapOnKernelBody :: Body flore -> m (Body tlore)
   , mapOnKernelVName :: VName -> m VName
-  , mapOnKernelCertificates :: Certificates -> m Certificates
   , mapOnKernelLParam :: LParam flore -> m (LParam tlore)
   , mapOnKernelKernelBody :: KernelBody flore -> m (KernelBody tlore)
   }
@@ -176,7 +176,6 @@ identityKernelMapper = KernelMapper { mapOnKernelSubExp = return
                                     , mapOnKernelLambda = return
                                     , mapOnKernelBody = return
                                     , mapOnKernelVName = return
-                                    , mapOnKernelCertificates = return
                                     , mapOnKernelLParam = return
                                     , mapOnKernelKernelBody = return
                                     }
@@ -191,9 +190,8 @@ mapKernelM _ GroupSize = pure GroupSize
 mapKernelM _ TileSize = pure TileSize
 mapKernelM tv (SufficientParallelism se) =
   SufficientParallelism <$> mapOnKernelSubExp tv se
-mapKernelM tv (Kernel desc cs space ts kernel_body) =
+mapKernelM tv (Kernel desc space ts kernel_body) =
   Kernel <$> mapOnKernelDebugHints desc <*>
-  mapOnKernelCertificates tv cs <*>
   mapOnKernelSpace space <*>
   mapM (mapOnKernelType tv) ts <*>
   mapOnKernelKernelBody tv kernel_body
@@ -231,14 +229,52 @@ instance (Attributes lore, FreeIn (LParamAttr lore)) =>
                               , mapOnKernelLambda = walk freeInLambda
                               , mapOnKernelBody = walk freeInBody
                               , mapOnKernelVName = walk freeIn
-                              , mapOnKernelCertificates = walk freeIn
                               , mapOnKernelLParam = walk freeIn
                               , mapOnKernelKernelBody = walk freeIn
                               }
 
+-- | Like 'Walker', but just for 'Kernel's.
+data KernelWalker lore m = KernelWalker {
+    walkOnKernelSubExp :: SubExp -> m ()
+  , walkOnKernelLambda :: Lambda lore -> m ()
+  , walkOnKernelBody :: Body lore -> m ()
+  , walkOnKernelVName :: VName -> m ()
+  , walkOnKernelLParam :: LParam lore -> m ()
+  , walkOnKernelKernelBody :: KernelBody lore -> m ()
+  }
+
+-- | A no-op traversal.
+identityKernelWalker :: Monad m => KernelWalker lore m
+identityKernelWalker = KernelWalker {
+    walkOnKernelSubExp = const $ return ()
+  , walkOnKernelLambda = const $ return ()
+  , walkOnKernelBody = const $ return ()
+  , walkOnKernelVName = const $ return ()
+  , walkOnKernelLParam = const $ return ()
+  , walkOnKernelKernelBody = const $ return ()
+  }
+
+walkKernelMapper :: forall lore m. Monad m =>
+                    KernelWalker lore m -> KernelMapper lore lore m
+walkKernelMapper f = KernelMapper {
+    mapOnKernelSubExp = wrap walkOnKernelSubExp
+  , mapOnKernelLambda = wrap walkOnKernelLambda
+  , mapOnKernelBody = wrap walkOnKernelBody
+  , mapOnKernelVName = wrap walkOnKernelVName
+  , mapOnKernelLParam = wrap walkOnKernelLParam
+  , mapOnKernelKernelBody = wrap walkOnKernelKernelBody
+  }
+  where wrap :: (KernelWalker lore m -> a -> m ()) -> a -> m a
+        wrap op k = op f k >> return k
+
+-- | As 'mapKernelM', but ignoring the results.
+walkKernelM :: Monad m => KernelWalker lore m -> Kernel lore -> m ()
+walkKernelM f = void . mapKernelM m
+  where m = walkKernelMapper f
+
 instance FreeIn KernelResult where
   freeIn (ThreadsReturn which what) = freeIn which <> freeIn what
-  freeIn (WriteReturn rw arr i e) = freeIn rw <> freeIn arr <> freeIn i <> freeIn e
+  freeIn (WriteReturn rws arr is e) = freeIn rws <> freeIn arr <> freeIn is <> freeIn e
   freeIn (ConcatReturns o w per_thread_elems moffset v) =
     freeIn o <> freeIn w <> freeIn per_thread_elems <> freeIn moffset <> freeIn v
   freeIn (KernelInPlaceReturn what) = freeIn what
@@ -266,10 +302,10 @@ instance Attributes lore => Substitute (KernelBody lore) where
 instance Substitute KernelResult where
   substituteNames subst (ThreadsReturn who se) =
     ThreadsReturn (substituteNames subst who) (substituteNames subst se)
-  substituteNames subst (WriteReturn rw arr i e) =
+  substituteNames subst (WriteReturn rws arr is e) =
     WriteReturn
-    (substituteNames subst rw) (substituteNames subst arr)
-    (substituteNames subst i) (substituteNames subst e)
+    (substituteNames subst rws) (substituteNames subst arr)
+    (substituteNames subst is) (substituteNames subst e)
   substituteNames subst (ConcatReturns o w per_thread_elems moffset v) =
     ConcatReturns
     (substituteNames subst o)
@@ -307,9 +343,8 @@ instance Substitute SpaceStructure where
     NestedThreadSpace (map (substituteNames subst) dims)
 
 instance Attributes lore => Substitute (Kernel lore) where
-  substituteNames subst (Kernel desc cs space ts kbody) =
+  substituteNames subst (Kernel desc space ts kbody) =
     Kernel desc
-    (substituteNames subst cs)
     (substituteNames subst space)
     (substituteNames subst ts)
     (substituteNames subst kbody)
@@ -319,7 +354,6 @@ instance Attributes lore => Substitute (Kernel lore) where
                          , mapOnKernelLambda = return . substituteNames subst
                          , mapOnKernelBody = return . substituteNames subst
                          , mapOnKernelVName = return . substituteNames subst
-                         , mapOnKernelCertificates = return . substituteNames subst
                          , mapOnKernelLParam = return . substituteNames subst
                          , mapOnKernelKernelBody = return . substituteNames subst
                          }
@@ -350,16 +384,16 @@ scopeOfKernelSpace (KernelSpace gtid ltid gid _ _ _ structure) =
 
 instance Attributes lore => Rename (Kernel lore) where
   rename = mapKernelM renamer
-    where renamer = KernelMapper rename rename rename rename rename rename rename
+    where renamer = KernelMapper rename rename rename rename rename rename
 
 kernelType :: Kernel lore -> [Type]
-kernelType (Kernel _ _ space ts body) =
+kernelType (Kernel _ space ts body) =
   zipWith resultShape ts $ kernelBodyResult body
   where dims = map snd $ spaceDimensions space
         num_groups = spaceNumGroups space
         num_threads = spaceNumThreads space
-        resultShape t (WriteReturn rw _ _ _) =
-          t `arrayOfRow` rw
+        resultShape t (WriteReturn rws _ _ _) =
+          t `arrayOfShape` Shape rws
         resultShape t (ThreadsReturn AllThreads _) =
           t `arrayOfRow` num_threads
         resultShape t (ThreadsReturn OneThreadPerGroup{} _) =
@@ -394,7 +428,7 @@ instance TypedOp (Kernel lore) where
 instance (Attributes lore, Aliased lore) => AliasedOp (Kernel lore) where
   opAliases = map (const mempty) . kernelType
 
-  consumedInOp (Kernel _ _ _ _ kbody) =
+  consumedInOp (Kernel _ _ _ kbody) =
     consumedInKernelBody kbody <>
     mconcat (map consumedByReturn (kernelBodyResult kbody))
     where consumedByReturn (WriteReturn _ a _ _) = S.singleton a
@@ -416,12 +450,12 @@ instance (Attributes lore,
 
   addOpAliases = runIdentity . mapKernelM alias
     where alias = KernelMapper return (return . Alias.analyseLambda)
-                  (return . Alias.analyseBody) return return return
+                  (return . Alias.analyseBody) return return
                   (return . aliasAnalyseKernelBody)
 
   removeOpAliases = runIdentity . mapKernelM remove
     where remove = KernelMapper return (return . removeLambdaAliases)
-                   (return . removeBodyAliases) return return return
+                   (return . removeBodyAliases) return return
                    (return . removeKernelBodyAliases)
           removeKernelBodyAliases :: KernelBody (Aliases lore)
                                   -> KernelBody lore
@@ -441,12 +475,12 @@ instance (Attributes lore, CanBeRanged (Op lore)) => CanBeRanged (Kernel lore) w
 
   removeOpRanges = runIdentity . mapKernelM remove
     where remove = KernelMapper return (return . removeLambdaRanges)
-                   (return . removeBodyRanges) return return return
+                   (return . removeBodyRanges) return return
                    (return . removeKernelBodyRanges)
           removeKernelBodyRanges = error "removeKernelBodyRanges"
   addOpRanges = Range.runRangeM . mapKernelM add
     where add = KernelMapper return Range.analyseLambda
-                Range.analyseBody return return return addKernelBodyRanges
+                Range.analyseBody return return addKernelBodyRanges
           addKernelBodyRanges (KernelBody attr stms res) =
             Range.analyseStms stms $ \stms' ->
             let attr' = (mkBodyRanges stms $ map kernelResultSubExp res, attr)
@@ -459,7 +493,7 @@ instance (Attributes lore, CanBeWise (Op lore)) => CanBeWise (Kernel lore) where
     where remove = KernelMapper return
                    (return . removeLambdaWisdom)
                    (return . removeBodyWisdom)
-                   return return return
+                   return return
                    (return . removeKernelBodyWisdom)
           removeKernelBodyWisdom :: KernelBody (Wise lore)
                                  -> KernelBody lore
@@ -468,9 +502,43 @@ instance (Attributes lore, CanBeWise (Op lore)) => CanBeWise (Kernel lore) where
             in KernelBody attr' stms' res
 
 instance ST.IndexOp (Kernel lore) where
+  indexOp vtable k (Kernel _ space _ kbody) is = do
+    ThreadsReturn which se <- maybeNth k $ kernelBodyResult kbody
+
+    prim_table <- case (which, is) of
+      (AllThreads, [i]) ->
+        Just $ M.singleton (spaceGlobalId space) (i,mempty)
+      (ThreadsInSpace, _)
+        | (gtids, _) <- unzip $ spaceDimensions space,
+          length gtids == length is ->
+            Just $ M.fromList $ zip gtids $ zip is $ repeat mempty
+      _ ->
+        Nothing
+
+    let prim_table' = foldl expandPrimExpTable prim_table $ kernelBodyStms kbody
+    case se of
+      Var v -> M.lookup v prim_table'
+      _ -> Nothing
+    where expandPrimExpTable table stm
+            | [v] <- patternNames $ stmPattern stm,
+              Just (pe,cs) <-
+                  runWriterT $ primExpFromExp (asPrimExp table) $ stmExp stm =
+                M.insert v (pe, stmCerts stm <> cs) table
+            | otherwise =
+                table
+
+          asPrimExp table (BasicOp (SubExp (Var v)))
+            | Just (e,cs) <- M.lookup v table = tell cs >> return e
+            | Just (Prim pt) <- ST.lookupType v vtable =
+                return $ LeafExp v pt
+          asPrimExp _ (BasicOp (SubExp (Constant v))) =
+            return $ ValueExp v
+          asPrimExp _ _ = lift Nothing
+
+  indexOp _ _ _ _ = Nothing
 
 instance Aliased lore => UsageInOp (Kernel lore) where
-  usageInOp (Kernel _ _ _ _ kbody) =
+  usageInOp (Kernel _ _ _ kbody) =
     mconcat $ map UT.consumedUsage $ S.toList $ consumedInKernelBody kbody
   usageInOp NumGroups = mempty
   usageInOp GroupSize = mempty
@@ -489,8 +557,7 @@ typeCheckKernel GroupSize = return ()
 typeCheckKernel TileSize = return ()
 typeCheckKernel SufficientParallelism{} = return ()
 
-typeCheckKernel (Kernel _ cs space kts kbody) = do
-  mapM_ (TC.requireI [Prim Cert]) cs
+typeCheckKernel (Kernel _ space kts kbody) = do
   checkSpace space
   mapM_ TC.checkType kts
   mapM_ (TC.require [Prim int32] . snd) $ spaceDimensions space
@@ -517,13 +584,15 @@ typeCheckKernel (Kernel _ cs space kts kbody) = do
         checkKernelResult (ThreadsReturn which what) t = do
           checkWhich which
           TC.require [t] what
-        checkKernelResult (WriteReturn rw arr i e) t = do
-          TC.require [Prim int32] rw
-          TC.require [Prim int32] i
+        checkKernelResult (WriteReturn rws arr is e) t = do
+          mapM_ (TC.require [Prim int32]) rws
+          mapM_ (TC.require [Prim int32]) is
           TC.require [t] e
           arr_t <- lookupType arr
-          unless (arr_t == t `arrayOfRow` rw) $
-            TC.bad $ TC.TypeError "Invalid type of array destination for WriteReturn."
+          unless (arr_t == t `arrayOfShape` Shape rws) $
+            TC.bad $ TC.TypeError $ "WriteReturn returning " ++
+            pretty e ++ " of type " ++ pretty t ++ ", shape=" ++ pretty rws ++
+            ", but destination array has type " ++ pretty arr_t
           TC.consume =<< TC.lookupAliases arr
         checkKernelResult (ConcatReturns o w per_thread_elems moffset v) t = do
           case o of
@@ -549,7 +618,7 @@ typeCheckKernel (Kernel _ cs space kts kbody) = do
           return ()
 
 instance OpMetrics (Op lore) => OpMetrics (Kernel lore) where
-  opMetrics (Kernel _ _ _ _ kbody) =
+  opMetrics (Kernel _ _ _ kbody) =
     inside "Kernel" $ kernelBodyMetrics kbody
     where kernelBodyMetrics :: KernelBody lore -> MetricsM ()
           kernelBodyMetrics = mapM_ bindingMetrics . kernelBodyStms
@@ -564,8 +633,7 @@ instance PrettyLore lore => PP.Pretty (Kernel lore) where
   ppr TileSize = text "$tile_size()"
   ppr (SufficientParallelism se) = text "$sufficientParallelism" <> parens (ppr se)
 
-  ppr (Kernel desc cs space ts body) =
-    ppCertificates' cs <>
+  ppr (Kernel desc space ts body) =
     text "kernel" <+> text (kernelName desc) <>
     PP.align (ppr space) <+>
     PP.colon <+> ppTuple' ts <+> PP.nestedBlock "{" "}" (ppr body)
@@ -603,9 +671,10 @@ instance Pretty KernelResult where
     text "thread <" <+> ppr limit <+> text "returns" <+> ppr what
   ppr (ThreadsReturn ThreadsInSpace what) =
     text "thread in space returns" <+> ppr what
-  ppr (WriteReturn rw arr i e) =
+  ppr (WriteReturn rws arr is e) =
     ppr arr <+> text "with" <+>
-    PP.brackets (ppr i <+> text "<" <+> ppr rw) <+> text "<-" <+> ppr e
+    PP.brackets (PP.commasep $ zipWith f is rws) <+> text "<-" <+> ppr e
+    where f i rw =ppr i <+> text "<" <+> ppr rw
   ppr (ConcatReturns o w per_thread_elems offset v) =
     text "concat" <> suff <>
     parens (commasep [ppr w, ppr per_thread_elems] <> offset_text) <+>

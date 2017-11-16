@@ -126,10 +126,10 @@ optimiseStms (bnd:bnds) m = do
         Nothing       -> checkIfForwardableUpdate bnd' $
                          updateStms ++ bnds'
 
-  where boundHere = patternNames $ bindingPattern bnd
+  where boundHere = patternNames $ stmPattern bnd
 
-        checkIfForwardableUpdate bnd'@(Let pat _ e) bnds'
-            | [PatElem v (BindInPlace cs src (DimFix i:slice)) attr] <- patternElements pat,
+        checkIfForwardableUpdate bnd'@(Let pat (StmAux cs _) e) bnds'
+            | [PatElem v (BindInPlace src (DimFix i:slice)) attr] <- patternElements pat,
               slice == drop 1 (fullSlice (typeOf attr) [DimFix i]),
               BasicOp (SubExp (Var ve)) <- e = do
                 forwarded <- maybeForward ve v attr cs src i
@@ -147,7 +147,7 @@ optimiseInStm (Let pat attr e) = do
 
 optimiseExp :: Exp (Aliases Kernels) -> ForwardingM (Exp (Aliases Kernels))
 optimiseExp (DoLoop ctx val form body) =
-  bindingScope False (scopeOfLoopForm form) $
+  bindingScope False (scopeOf form) $
   bindingFParams (map fst $ ctx ++ val) $ do
     body' <- optimiseBody body
     return $ DoLoop ctx val form body'
@@ -183,7 +183,6 @@ updateStm :: DesiredUpdate (LetAttr (Aliases Kernels)) -> Stm (Aliases Kernels)
 updateStm fwd =
   mkLet [] [(Ident (updateName fwd) $ typeOf $ updateType fwd,
              BindInPlace
-             (updateCertificates fwd)
              (updateSource fwd)
              (fullSlice (typeOf $ updateType fwd) $ updateIndices fwd))] $
   BasicOp $ SubExp $ Var $ updateValue fwd
@@ -297,7 +296,7 @@ maybeForward v dest_nm dest_attr cs src i = do
   -- Checks condition (2)
   available <- [i,Var src] `areAvailableBefore` v
   -- ...subcondition, the certificates must also.
-  certs_available <- map Var cs `areAvailableBefore` v
+  certs_available <- map Var (S.toList $ freeIn cs) `areAvailableBefore` v
   -- Check condition (3)
   samebody <- isInCurrentBody v
   -- Check condition (6)

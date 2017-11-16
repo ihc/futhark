@@ -30,6 +30,7 @@ data Rephraser m from to
               , rephraseLParamLore :: LParamAttr from -> m (LParamAttr to)
               , rephraseBodyLore :: BodyAttr from -> m (BodyAttr to)
               , rephraseRetType :: RetType from -> m (RetType to)
+              , rephraseBranchType :: BranchType from -> m (BranchType to)
               , rephraseOp :: Op from -> m (Op to)
               }
 
@@ -40,17 +41,17 @@ rephraseFunDef :: Monad m => Rephraser m from to -> FunDef from -> m (FunDef to)
 rephraseFunDef rephraser fundec = do
   body' <- rephraseBody rephraser $ funDefBody fundec
   params' <- mapM (rephraseParam $ rephraseFParamLore rephraser) $ funDefParams fundec
-  rettype' <- rephraseRetType rephraser $ funDefRetType fundec
+  rettype' <- mapM (rephraseRetType rephraser) $ funDefRetType fundec
   return fundec { funDefBody = body', funDefParams = params', funDefRetType = rettype' }
 
 rephraseExp :: Monad m => Rephraser m from to -> Exp from -> m (Exp to)
 rephraseExp = mapExpM . mapper
 
 rephraseStm :: Monad m => Rephraser m from to -> Stm from -> m (Stm to)
-rephraseStm rephraser (Let pat lore e) =
+rephraseStm rephraser (Let pat (StmAux cs attr) e) =
   Let <$>
   rephrasePattern (rephraseLetBoundLore rephraser) pat <*>
-  rephraseExpLore rephraser lore <*>
+  (StmAux cs <$> rephraseExpLore rephraser attr) <*>
   rephraseExp rephraser e
 
 rephrasePattern :: Monad m =>
@@ -64,8 +65,8 @@ rephrasePattern f (Pattern context values) =
 rephrasePatElem :: Monad m => (from -> m to) -> PatElemT from -> m (PatElemT to)
 rephrasePatElem rephraser (PatElem ident BindVar from) =
   PatElem ident BindVar <$> rephraser from
-rephrasePatElem rephraser (PatElem ident (BindInPlace cs src is) from) =
-  PatElem ident (BindInPlace cs src is) <$> rephraser from
+rephrasePatElem rephraser (PatElem ident (BindInPlace src is) from) =
+  PatElem ident (BindInPlace src is) <$> rephraser from
 
 rephraseParam :: Monad m => (from -> m to) -> ParamT from -> m (ParamT to)
 rephraseParam rephraser (Param name from) =
@@ -94,6 +95,7 @@ mapper :: Monad m => Rephraser m from to -> Mapper from to m
 mapper rephraser = identityMapper {
     mapOnBody = const $ rephraseBody rephraser
   , mapOnRetType = rephraseRetType rephraser
+  , mapOnBranchType = rephraseBranchType rephraser
   , mapOnFParam = rephraseParam (rephraseFParamLore rephraser)
   , mapOnLParam = rephraseParam (rephraseLParamLore rephraser)
   , mapOnOp = rephraseOp rephraser
@@ -103,20 +105,16 @@ mapper rephraser = identityMapper {
 castStm :: (SameScope from to,
             ExpAttr from ~ ExpAttr to,
             BodyAttr from ~ BodyAttr to,
-            RetType from ~ RetType to) =>
+            RetType from ~ RetType to,
+            BranchType from ~ BranchType to) =>
            Stm from -> Maybe (Stm to)
 castStm = rephraseStm caster
-
-caster :: (SameScope from to,
-           ExpAttr from ~ ExpAttr to,
-           BodyAttr from ~ BodyAttr to,
-           RetType from ~ RetType to) =>
-          Rephraser Maybe from to
-caster = Rephraser { rephraseExpLore = Just
-                   , rephraseBodyLore = Just
-                   , rephraseLetBoundLore = Just
-                   , rephraseFParamLore = Just
-                   , rephraseLParamLore = Just
-                   , rephraseOp = const Nothing
-                   , rephraseRetType = Just
-                   }
+  where caster = Rephraser { rephraseExpLore = Just
+                           , rephraseBodyLore = Just
+                           , rephraseLetBoundLore = Just
+                           , rephraseFParamLore = Just
+                           , rephraseLParamLore = Just
+                           , rephraseOp = const Nothing
+                           , rephraseRetType = Just
+                           , rephraseBranchType = Just
+                           }

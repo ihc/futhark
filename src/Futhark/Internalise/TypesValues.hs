@@ -53,25 +53,24 @@ internaliseUniqueness E.Unique = I.Unique
 newtype BoundInTypes = BoundInTypes (S.Set VName)
 
 -- | Determine the names bound for some types.
-boundInTypes :: [E.TypeParam] -> [E.TypeBase (E.ShapeDecl VName) ()]
-             -> BoundInTypes
-boundInTypes tparams ts =
-  case mapMaybe isTypeParam tparams of
-    [] -> BoundInTypes $ mconcat $ map E.dimsBoundByType ts
-    names -> BoundInTypes $ S.fromList names
+boundInTypes :: [E.TypeParam] -> BoundInTypes
+boundInTypes = BoundInTypes . S.fromList . mapMaybe isTypeParam
   where isTypeParam (E.TypeParamDim v _) = Just v
         isTypeParam E.TypeParamType{} = Nothing
 
 internaliseParamTypes :: BoundInTypes
-                      -> [E.TypeBase (E.ShapeDecl VName) ()]
+                      -> M.Map VName VName
+                      -> [E.TypeBase (E.DimDecl VName) ()]
                       -> InternaliseM ([[I.TypeBase ExtShape Uniqueness]],
                                        M.Map VName Int,
                                        ConstParams)
-internaliseParamTypes (BoundInTypes bound) ts = do
-  (ts', subst, cm) <- runInternaliseTypeM bound $ mapM internaliseTypeM ts
+internaliseParamTypes (BoundInTypes bound) pnames ts = do
+  (ts', subst, cm) <- runInternaliseTypeM bound $
+                      withDims (M.map (Free . Var) pnames) $
+                      mapM internaliseTypeM ts
   return (ts', subst, cm)
 
-internaliseReturnType :: E.TypeBase (E.ShapeDecl VName) ()
+internaliseReturnType :: E.TypeBase (E.DimDecl VName) ()
                       -> InternaliseM ([I.TypeBase ExtShape Uniqueness],
                                        M.Map VName Int,
                                        ConstParams)
@@ -81,7 +80,7 @@ internaliseReturnType t = do
 
 -- | As 'internaliseReturnType', but returns components of a top-level
 -- tuple type piecemeal.
-internaliseEntryReturnType :: E.TypeBase (E.ShapeDecl VName) ()
+internaliseEntryReturnType :: E.TypeBase (E.DimDecl VName) ()
                            -> InternaliseM ([[I.TypeBase ExtShape Uniqueness]],
                                             M.Map VName Int,
                                             ConstParams)
@@ -92,8 +91,8 @@ internaliseEntryReturnType t = do
     runInternaliseTypeM mempty $ mapM internaliseTypeM ts
   return (ts', subst', cm')
 
-internaliseTypes :: E.ArrayShape shape =>
-                    [E.TypeBase shape ()]
+internaliseTypes :: E.ArrayDim dim =>
+                    [E.TypeBase dim ()]
                  -> InternaliseM [[I.TypeBase I.ExtShape Uniqueness]]
 internaliseTypes ts = do
   (st', _, _) <-
@@ -101,7 +100,7 @@ internaliseTypes ts = do
     mapM (internaliseTypeM . E.vacuousShapeAnnotations) ts
   return st'
 
-internaliseType :: E.TypeBase E.Rank ()
+internaliseType :: E.TypeBase () ()
                 -> InternaliseM [I.TypeBase I.ExtShape Uniqueness]
 internaliseType t = do
   (t', _, _) <-
@@ -110,9 +109,9 @@ internaliseType t = do
   return t'
 
 reExt :: ExtType -> InternaliseTypeM ExtType
-reExt (Array t (ExtShape ds) u) = do
+reExt (Array t (Shape ds) u) = do
   (_, ds') <- mapAccumLM update mempty ds
-  return $ Array t (ExtShape ds') u
+  return $ Array t (Shape ds') u
   where update seen (Ext x)
           | Just x' <- M.lookup x seen =
               return (seen, Ext x')
@@ -129,12 +128,11 @@ newId = do (i,m,cm) <- get
            return i
 
 internaliseDim :: E.DimDecl VName
-               -> InternaliseTypeM ExtDimSize
+               -> InternaliseTypeM ExtSize
 internaliseDim d =
   case d of
     E.AnyDim -> Ext <$> newId
     E.ConstDim n -> return $ Free $ intConst I.Int32 $ toInteger n
-    E.BoundDim name -> namedDim $ E.qualName name
     E.NamedDim name -> namedDim name
   where namedDim name = do
           name' <- liftInternaliseM $ lookupSubst name
@@ -165,17 +163,17 @@ internaliseTypeM orig_t =
       internaliseArrayType at
   where internaliseArrayType (E.PrimArray bt shape u _) = do
           dims <- internaliseShape shape
-          return [I.arrayOf (I.Prim $ internalisePrimType bt) (ExtShape dims) $
+          return [I.arrayOf (I.Prim $ internalisePrimType bt) (Shape dims) $
                   internaliseUniqueness u]
 
         internaliseArrayType (E.PolyArray v targs shape u _) = do
           ts <- applyType v targs
           dims <- internaliseShape shape
           forM ts $ \t ->
-            return $ I.arrayOf t (ExtShape dims) $ internaliseUniqueness u
+            return $ I.arrayOf t (Shape dims) $ internaliseUniqueness u
 
         internaliseArrayType (E.RecordArray elemts shape u) = do
-          innerdims <- ExtShape <$> internaliseShape shape
+          innerdims <- Shape <$> internaliseShape shape
           ts <- concat <$> mapM (internaliseRecordArrayElem . snd) (E.sortFields elemts)
           return [ I.arrayOf ct innerdims $
                    if I.unique ct then Unique
@@ -183,7 +181,7 @@ internaliseTypeM orig_t =
                         else I.uniqueness ct
                  | ct <- ts ]
 
-        internaliseRecordArrayElem (E.PrimArrayElem bt _ _) =
+        internaliseRecordArrayElem (E.PrimArrayElem bt _) =
           return [I.Prim $ internalisePrimType bt]
         internaliseRecordArrayElem (E.PolyArrayElem v targs _ _) =
           map (`I.toDecl` Nonunique) <$> applyType v targs
@@ -194,11 +192,11 @@ internaliseTypeM orig_t =
 
         internaliseShape = mapM internaliseDim . E.shapeDims
 
-internaliseSimpleType :: E.TypeBase E.Rank ()
+internaliseSimpleType :: E.TypeBase () ()
                       -> Maybe [I.TypeBase ExtShape NoUniqueness]
 internaliseSimpleType = fmap (map I.fromDecl) . internaliseTypeWithUniqueness
 
-internaliseTypeWithUniqueness :: E.TypeBase E.Rank ()
+internaliseTypeWithUniqueness :: E.TypeBase () ()
                               -> Maybe [I.TypeBase ExtShape Uniqueness]
 internaliseTypeWithUniqueness = flip evalStateT 0 . internaliseType'
   where internaliseType' E.TypeVar{} =
@@ -214,12 +212,12 @@ internaliseTypeWithUniqueness = flip evalStateT 0 . internaliseType'
           lift Nothing
         internaliseArrayType (E.PrimArray bt shape u _) = do
           dims <- map Ext <$> replicateM (E.shapeRank shape) newId'
-          return [I.arrayOf (I.Prim $ internalisePrimType bt) (ExtShape dims) $
+          return [I.arrayOf (I.Prim $ internalisePrimType bt) (Shape dims) $
                   internaliseUniqueness u]
         internaliseArrayType (E.RecordArray elemts shape u) = do
           dims <- map Ext <$> replicateM (E.shapeRank shape) newId'
           ts <- concat <$> mapM (internaliseRecordArrayElem . snd) (E.sortFields elemts)
-          return [ I.arrayOf t (ExtShape dims) $
+          return [ I.arrayOf t (Shape dims) $
                     if I.unique t then Unique
                     else if I.primType t then u
                          else I.uniqueness t
@@ -227,7 +225,7 @@ internaliseTypeWithUniqueness = flip evalStateT 0 . internaliseType'
 
         internaliseRecordArrayElem E.PolyArrayElem{} =
           lift Nothing
-        internaliseRecordArrayElem (E.PrimArrayElem bt _ _) =
+        internaliseRecordArrayElem (E.PrimArrayElem bt _) =
           return [I.Prim $ internalisePrimType bt]
         internaliseRecordArrayElem (E.ArrayArrayElem at) =
           internaliseArrayType at
@@ -238,7 +236,7 @@ internaliseTypeWithUniqueness = flip evalStateT 0 . internaliseType'
                     put $ i + 1
                     return i
 
-data TypeArg = TypeArgDim ExtDimSize | TypeArgType [I.ExtType]
+data TypeArg = TypeArgDim ExtSize | TypeArgType [I.ExtType]
 
 internaliseTypeArg :: E.StructTypeArg -> InternaliseTypeM TypeArg
 internaliseTypeArg (E.TypeArgDim d _) =
@@ -272,8 +270,8 @@ applyType tname targs = do
 
 -- | Map type variables from the first argument to corresponding types
 -- in the second argument.
-mapTypeVariables :: E.TypeBase E.Rank () -> E.TypeBase E.Rank ()
-                 -> InternaliseM (M.Map VName (E.TypeBase E.Rank ()))
+mapTypeVariables :: E.TypeBase () () -> E.TypeBase () ()
+                 -> InternaliseM (M.Map VName (E.TypeBase () ()))
 mapTypeVariables _ y_t@E.TypeVar{} =
   fail $ "mapTypeVariables: Type variable \"" ++ pretty y_t ++ "\" in second argument."
 mapTypeVariables _ y_t@(E.Array E.PolyArray{}) =
@@ -299,7 +297,7 @@ mapTypeVariables (E.Record fs_x) (E.Record fs_y) =
 mapTypeVariables _ _ =
   return mempty
 
-fullyApplyType :: E.TypeBase E.Rank () -> InternaliseM (E.TypeBase E.Rank ())
+fullyApplyType :: E.TypeBase () () -> InternaliseM (E.TypeBase () ())
 fullyApplyType t = do
   (t', _, _) <- runInternaliseTypeM mempty $ fullyApplyTypeM $ E.vacuousShapeAnnotations t
   return $ E.removeShapeAnnotations t'
@@ -332,8 +330,8 @@ fullyApplyTypeM (E.Array at) = inArray at
 
 -- | How many core language values are needed to represent one source
 -- language value of the given type?
-internalisedTypeSize :: E.ArrayShape shape =>
-                        E.TypeBase shape () -> InternaliseM Int
+internalisedTypeSize :: E.ArrayDim dim =>
+                        E.TypeBase dim () -> InternaliseM Int
 internalisedTypeSize = fmap length . internaliseType . E.removeShapeAnnotations
 
 -- | Transform an external value to a number of internal values.

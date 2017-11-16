@@ -4,7 +4,6 @@ module Futhark.Actions
   , interpretAction
   , impCodeGenAction
   , kernelImpCodeGenAction
-  , seqCodeGenAction
   , rangeAction
   )
 where
@@ -31,9 +30,8 @@ import Futhark.Representation.ExplicitMemory (ExplicitMemory)
 import Futhark.Interpreter
 import qualified Futhark.CodeGen.ImpGen.Sequential as ImpGenSequential
 import qualified Futhark.CodeGen.ImpGen.Kernels as ImpGenKernels
-import qualified Futhark.CodeGen.Backends.SequentialC as SequentialC
 import Futhark.Representation.AST.Attributes.Ranges (CanBeRanged)
-import Futhark.Util.Pretty (text, ppr, prettyDoc, prettyText)
+import Futhark.Util.Pretty (text, ppr, prettyDoc, prettyText, brackets, (<>))
 
 printAction :: (Attributes lore, CanBeAliased (Op lore)) => Action lore
 printAction =
@@ -58,16 +56,6 @@ rangeAction =
            , actionDescription = "Print the program with range annotations added."
            , actionProcedure = liftIO . putStrLn . pretty . rangeAnalysis
            }
-
-seqCodeGenAction :: Action ExplicitMemory
-seqCodeGenAction =
-  Action { actionName = "Compile sequentially"
-         , actionDescription = "Translate program into sequential C and write it on standard output."
-         , actionProcedure = \prog ->
-                               either (`internalError` prettyText prog) (liftIO . putStrLn) =<<
-                               SequentialC.compileProg prog
-         }
-
 
 impCodeGenAction :: Action ExplicitMemory
 impCodeGenAction =
@@ -105,7 +93,7 @@ interpret parseValues entry prog =
         Right val -> putStrLn $ ppOutput val $
                      fromMaybe (repeat TypeDirect) $ snd <$> funDefEntryPoint fundef
   where ppOutput vs epts = intercalate "\n" $ zipWith prettyRetVal epts vs
-        prettyRetVal ept v = prettyDoc 80 $ ppArray (prettyPrim ept) v
+        prettyRetVal ept v = prettyDoc 80 $ ppArray (prettyType ept) (prettyPrim ept) v
         prettyPrim TypeUnsigned (IntValue (Int8Value v))  =
           text $ show (fromIntegral v :: Word8) ++ "u8"
         prettyPrim TypeUnsigned (IntValue (Int16Value v)) =
@@ -116,3 +104,15 @@ interpret parseValues entry prog =
           text $ show (fromIntegral v :: Word64) ++ "u64"
         prettyPrim _ v =
           ppr v
+        prettyType TypeUnsigned (Prim (IntType Int8))  =
+          text "u8"
+        prettyType TypeUnsigned (Prim (IntType Int16)) =
+          text "u16"
+        prettyType TypeUnsigned (Prim (IntType Int32))  =
+          text "u32"
+        prettyType TypeUnsigned (Prim (IntType Int64)) =
+          text "u64"
+        prettyType ept (Array et (Rank n) u) =
+          ppr u <> mconcat (replicate n $ brackets mempty) <> prettyType ept (Prim et)
+        prettyType _ t =
+          ppr t

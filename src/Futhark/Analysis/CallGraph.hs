@@ -7,6 +7,7 @@ module Futhark.Analysis.CallGraph
   where
 
 import Control.Monad.Reader
+import Control.Monad.State
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (isJust)
@@ -61,31 +62,32 @@ buildCGfun cg fname  = do
                       foldM buildCGfun cg' callees
 
 buildCGbody :: S.Set Name -> Body -> S.Set Name
-buildCGbody callees = foldl (\x -> buildCGexp x . bindingExp) callees . bodyStms
+buildCGbody callees = foldl (\x -> buildCGexp x . stmExp) callees . bodyStms
 
 buildCGexp :: S.Set Name -> Exp -> S.Set Name
-buildCGexp callees (Apply fname _ _)
+buildCGexp callees (Apply fname _ _ _)
   | fname `elem` callees = callees
   | otherwise            = S.insert fname callees
 buildCGexp callees (Op op) =
-  case op of Map _ _ lam _ ->
+  case op of Map _ lam _ ->
                buildCGbody callees $ lambdaBody lam
-             Reduce _ _ _ lam _ ->
+             Reduce _ _ lam _ ->
                buildCGbody callees $ lambdaBody lam
-             Scan _ _ lam _ ->
+             Scan _ lam _ ->
                buildCGbody callees $ lambdaBody lam
-             Redomap _ _ _ lam0 lam1 _ _ ->
+             Redomap _ _ lam0 lam1 _ _ ->
                buildCGbody (buildCGbody callees $ lambdaBody lam0) (lambdaBody lam1)
-             Scanomap _ _ lam0 lam1 _ _ ->
+             Scanomap _ lam0 lam1 _ _ ->
                buildCGbody (buildCGbody callees $ lambdaBody lam0) (lambdaBody lam1)
-             Stream _ _ (RedLike _ _ lam0 _) lam _ ->
+             Stream _ (Parallel _ _ lam0 _) lam _ ->
                buildCGbody (buildCGbody callees $ lambdaBody lam0) (extLambdaBody lam)
-             Stream _ _ _ lam _ ->
+             Stream _ _ lam _ ->
                buildCGbody callees (extLambdaBody lam)
              Scatter {} ->
                callees
 buildCGexp callees e =
-  foldExp folder callees e
-  where folder =
-          identityFolder { foldOnBody = \x body -> return $ buildCGbody x body
-                         }
+  execState (mapExpM folder e) callees
+  where folder = identityMapper {
+          mapOnBody = \_ body -> do put =<< (buildCGbody <$> get <*> pure body)
+                                    return body
+          }

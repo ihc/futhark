@@ -31,6 +31,7 @@ module Futhark.TypeCheck
   , checkExtType
   , matchExtPattern
   , matchExtReturnType
+  , matchExtBranchType
   , argType
   , argAliases
   , noArgAliases
@@ -61,6 +62,7 @@ import Data.Maybe
 
 import Prelude
 
+import Futhark.Construct (instantiateShapes)
 import Futhark.Representation.Aliases
 import Futhark.Analysis.Alias
 import Futhark.Util
@@ -158,7 +160,7 @@ instance Checkable lore => Show (TypeError lore) where
 
 -- | A tuple of a return type and a list of parameters, possibly
 -- named.
-type FunBinding lore = (RetType (Aliases lore), [FParam (Aliases lore)])
+type FunBinding lore = ([RetType (Aliases lore)], [FParam (Aliases lore)])
 
 type VarBinding lore = NameInfo (Aliases lore)
 
@@ -285,9 +287,6 @@ message :: Pretty a =>
            String -> a -> String
 message s x = prettyDoc 80 $
               text s <+> align (ppr x)
-
-liftEitherS :: Either String a -> TypeM lore a
-liftEitherS = either (bad . TypeError) return
 
 -- | Mark a name as bound.  If the name has been bound previously in
 -- the program, report a type error.
@@ -417,7 +416,7 @@ subExpAliasesM (Var v)    = lookupAliases v
 lookupFun :: Checkable lore =>
              Name
           -> [SubExp]
-          -> TypeM lore (RetType lore, [DeclType])
+          -> TypeM lore ([RetType lore], [DeclType])
 lookupFun fname args = do
   bnd <- asks $ M.lookup fname . envFtable
   case bnd of
@@ -496,7 +495,7 @@ initialFtable :: Checkable lore =>
 initialFtable _ = fmap M.fromList $ mapM addBuiltin $ M.toList builtInFunctions
   where addBuiltin (fname, (t, ts)) = do
           ps <- mapM (primFParam name) ts
-          return (fname, (primRetType t, ps))
+          return (fname, ([primRetType t], ps))
         name = VName (nameFromString "x") 0
 
 checkFun :: Checkable lore =>
@@ -509,7 +508,7 @@ checkFun (FunDef _ fname rettype params body) =
                body) consumable $ do
       checkFunParams params
       checkRetType rettype
-      checkFunBody fname rettype body
+      checkFunBody rettype body
         where consumable = [ (paramName param, mempty)
                            | param <- params
                            , unique $ paramDeclType param
@@ -576,8 +575,9 @@ checkFun' (fname, rettype, params, body) consumable check = do
         tag u = S.map $ \name -> (u, name)
 
         returnAliasing expected got =
-          [ (uniqueness p, names) |
-            (p,names) <- zip expected got ]
+          reverse $
+          zip (reverse (map uniqueness expected) ++ repeat Nonunique) $
+          reverse got
 
 subCheck :: forall lore newlore a.
             (Checkable newlore,
@@ -611,11 +611,10 @@ checkStms :: Checkable lore =>
              [Stm (Aliases lore)] -> TypeM lore a
           -> TypeM lore a
 checkStms origbnds m = delve origbnds
-  where delve (Let pat (_,annot) e:bnds) = do
+  where delve (stm@(Let pat _ e):bnds) = do
           context ("In expression of statement " ++ pretty pat) $
             checkExp e
-          checkExpLore annot
-          checkStm pat e $
+          checkStm stm $
             delve bnds
         delve [] =
           m
@@ -625,14 +624,14 @@ checkResult :: Checkable lore =>
 checkResult = mapM_ checkSubExp
 
 checkFunBody :: Checkable lore =>
-                Name
-             -> RetType lore
+                [RetType lore]
              -> Body (Aliases lore)
              -> TypeM lore ()
-checkFunBody fname rt (Body (_,lore) bnds res) = do
+checkFunBody rt (Body (_,lore) bnds res) = do
   checkStms bnds $ do
-    checkResult res
-    matchReturnType fname rt res
+    context "When checking body result" $ checkResult res
+    context "When matching declared return type to result of body" $
+      matchReturnType rt res
   checkBodyLore lore
 
 checkLambdaBody :: Checkable lore =>
@@ -693,10 +692,9 @@ checkBasicOp (BinOp op e1 e2) = checkBinOpArgs (binOpType op) e1 e2
 
 checkBasicOp (CmpOp op e1 e2) = checkCmpOp op e1 e2
 
-checkBasicOp (ConvOp op e) = require [Prim $ fst $ convTypes op] e
+checkBasicOp (ConvOp op e) = require [Prim $ fst $ convOpType op] e
 
-checkBasicOp (Index cs ident idxes) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBasicOp (Index ident idxes) = do
   vt <- lookupType ident
   observe ident
   when (arrayRank vt /= length idxes) $
@@ -721,9 +719,8 @@ checkBasicOp (Repeat shapes innershape v) = do
 checkBasicOp (Scratch _ shape) =
   mapM_ checkSubExp shape
 
-checkBasicOp (Reshape cs newshape arrexp) = do
+checkBasicOp (Reshape newshape arrexp) = do
   rank <- arrayRank <$> checkArrIdent arrexp
-  mapM_ (requireI [Prim Cert]) cs
   mapM_ (require [Prim int32] . newDim) newshape
   zipWithM_ (checkDimChange rank) newshape [0..]
   where checkDimChange _ (DimNew _) _ =
@@ -736,23 +733,20 @@ checkBasicOp (Reshape cs newshape arrexp) = do
           | otherwise =
             return ()
 
-checkBasicOp (Rearrange cs perm arr) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBasicOp (Rearrange perm arr) = do
   arrt <- lookupType arr
   let rank = arrayRank arrt
   when (length perm /= rank || sort perm /= [0..rank-1]) $
     bad $ PermutationError perm rank $ Just arr
 
-checkBasicOp (Rotate cs rots arr) = do
+checkBasicOp (Rotate rots arr) = do
   arrt <- lookupType arr
-  mapM_ (requireI [Prim Cert]) cs
   let rank = arrayRank arrt
   when (length rots /= rank) $
     bad $ TypeError $ "Cannot rotate " ++ show (length rots) ++
     " dimensions of " ++ show rank ++ "-dimensional array."
 
-checkBasicOp (Split cs i sizeexps arrexp) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBasicOp (Split i sizeexps arrexp) = do
   mapM_ (require [Prim int32]) sizeexps
   t <- checkArrIdent arrexp
   when (arrayRank t <= i) $
@@ -761,8 +755,7 @@ checkBasicOp (Split cs i sizeexps arrexp) = do
     ++ " of type " ++ pretty t
     ++ " along dimension " ++ pretty i ++ "."
 
-checkBasicOp (Concat cs i arr1exp arr2exps ressize) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBasicOp (Concat i arr1exp arr2exps ressize) = do
   arr1t  <- checkArrIdent arr1exp
   arr2ts <- mapM checkArrIdent arr2exps
   let success = all (== (dropAt i 1 $ arrayDims arr1t)) $
@@ -777,13 +770,12 @@ checkBasicOp (Copy e) =
   void $ checkArrIdent e
 
 checkBasicOp (Manifest perm arr) =
-  checkBasicOp $ Rearrange [] perm arr -- Basically same thing!
+  checkBasicOp $ Rearrange perm arr -- Basically same thing!
 
-checkBasicOp (Assert e _) =
+checkBasicOp (Assert e _ _) =
   require [Prim Bool] e
 
-checkBasicOp (Partition cs _ flags arrs) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBasicOp (Partition _ flags arrs) = do
   flagst <- lookupType flags
   unless (rowType flagst == Prim int32) $
     bad $ TypeError $ "Flag array has type " ++ pretty flagst ++ "."
@@ -799,20 +791,13 @@ checkExp :: Checkable lore =>
 
 checkExp (BasicOp op) = checkBasicOp op
 
-checkExp (If e1 e2 e3 ts) = do
+checkExp (If e1 e2 e3 info) = do
   require [Prim Bool] e1
   _ <- checkBody e2 `alternative` checkBody e3
-  ts2 <- bodyExtType e2
-  ts3 <- bodyExtType e3
-  unless ((ts2 `generaliseExtTypes` ts3) `subtypesOf` ts) $
-    bad $ TypeError $
-    unlines ["If-expression branches have types",
-             "  " ++ prettyTuple ts2 ++ ", and",
-             "  " ++ prettyTuple ts3,
-             "But the annotation is",
-             "  " ++ prettyTuple ts]
+  context "in true branch" $ matchBranchType (ifReturns info) e2
+  context "in false branch" $ matchBranchType (ifReturns info) e3
 
-checkExp (Apply fname args rettype_annot) = do
+checkExp (Apply fname args rettype_annot _) = do
   (rettype_derived, paramtypes) <- lookupFun fname $ map fst args
   argflows <- mapM (checkArg . fst) args
   when (rettype_derived /= rettype_annot) $
@@ -825,7 +810,7 @@ checkExp (DoLoop ctxmerge valmerge form loopbody) = do
       (mergepat, mergeexps) = unzip merge
   mergeargs <- mapM checkArg mergeexps
 
-  binding (scopeOfLoopForm form) $ do
+  binding (scopeOf form) $ do
     case form of
       ForLoop loopvar it boundexp loopvars -> do
         iparam <- primFParam loopvar $ IntType it
@@ -910,7 +895,7 @@ checkType = mapM_ checkSubExp . arrayDims
 checkExtType :: Checkable lore =>
                 TypeBase ExtShape u
              -> TypeM lore ()
-checkExtType = mapM_ checkExtDim . extShapeDims . arrayShape
+checkExtType = mapM_ checkExtDim . shapeDims . arrayShape
   where checkExtDim (Free se) = void $ checkSubExp se
         checkExtDim (Ext _)   = return ()
 
@@ -947,8 +932,7 @@ checkDimIndex (DimSlice i n s) = mapM_ (require [Prim int32]) [i,n,s]
 checkBindage :: Checkable lore =>
                 Bindage -> TypeM lore ()
 checkBindage BindVar = return ()
-checkBindage (BindInPlace cs src is) = do
-  mapM_ (requireI [Prim Cert]) cs
+checkBindage (BindInPlace src is) = do
   srct <- lookupType src
   mapM_ checkDimIndex is
 
@@ -958,64 +942,59 @@ checkBindage (BindInPlace cs src is) = do
     bad $ SlicingError (arrayRank srct) (length is)
 
 checkStm :: Checkable lore =>
-            Pattern (Aliases lore) -> Exp (Aliases lore)
+            Stm (Aliases lore)
          -> TypeM lore a
          -> TypeM lore a
-checkStm pat e m = do
+checkStm stm@(Let pat (StmAux (Certificates cs) (_,attr)) e) m = do
+  mapM_ (requireI [Prim Cert]) cs
+  checkExpLore attr
   context ("When matching\n" ++ message "  " pat ++ "\nwith\n" ++ message "  " e) $
     matchPattern pat e
-  binding (scopeOf pat) $ do
+  binding (scopeOf stm) $ do
     mapM_ checkPatElem (patternElements $ removePatternAliases pat)
     m
 
 matchExtPattern :: Checkable lore =>
-                   [PatElem (Aliases lore)]
-                -> [ExtType] -> TypeM lore ()
-matchExtPattern pat ts = do
-  (ts', restpat, _) <- liftEitherS $ patternContext pat ts
-  unless (length restpat == length ts') $
-    bad $ InvalidPatternError (Pattern [] pat) ts Nothing
-  evalStateT (zipWithM_ checkStm' restpat ts') []
-  where checkStm' patElem@(PatElem name _ _) t = do
-          lift $ checkAnnotation ("binding of variable " ++ pretty name)
-            (patElemRequires patElem) t
-          add name
-
-        add name = do
-          seen <- gets $ elem name
-          if seen
-            then lift $ bad $ DupPatternError name
-            else modify (name:)
+                   Pattern (Aliases lore) -> [ExtType] -> TypeM lore ()
+matchExtPattern pat ts =
+  unless (expExtTypesFromPattern pat == ts) $
+    bad $ InvalidPatternError pat ts Nothing
 
 matchExtReturnType :: Checkable lore =>
-                      Name -> [ExtType] -> Result
-                   -> TypeM lore ()
-matchExtReturnType fname rettype ses = do
-  ts <- staticShapes <$> mapM subExpType ses
-  unless (ts `subtypesOf` rettype) $
-    bad $ ReturnTypeError fname rettype ts
+                      [ExtType] -> Result -> TypeM lore ()
+matchExtReturnType rettype res = do
+  ts <- mapM subExpType res
+  matchExtReturns rettype res ts
 
-patternContext :: Typed attr =>
-                  [PatElemT attr] -> [ExtType] ->
-                  Either String ([Type], [PatElemT attr], [PatElemT attr])
-patternContext pat rt = do
-  (rt', (restpat,_), shapepat) <- runRWST (mapM extract rt) () (pat, M.empty)
-  return (rt', restpat, shapepat)
-  where extract t = setArrayShape t . Shape <$>
-                    mapM extract' (extShapeDims $ arrayShape t)
-        extract' (Free se) = return se
-        extract' (Ext x)   = correspondingVar x
-        correspondingVar x = do
-          (remnames, m) <- get
-          case (remnames, M.lookup x m) of
-            (_, Just v) -> return $ Var $ patElemName v
-            (v:vs, Nothing)
-              | Prim (IntType Int32) <- patElemType v -> do
-                tell [v]
-                put (vs, M.insert x v m)
-                return $ Var $ patElemName v
-            (_, Nothing) ->
-              lift $ Left "Pattern cannot match context"
+matchExtBranchType :: Checkable lore =>
+                      [ExtType] -> Body (Aliases lore) -> TypeM lore ()
+matchExtBranchType rettype (Body _ stms res) = do
+  ts <- extendedScope (traverse subExpType res) stmscope
+  matchExtReturns rettype res ts
+  where stmscope = scopeOf stms
+
+matchExtReturns :: Checkable lore =>
+                   [ExtType] -> Result -> [Type] -> TypeM lore ()
+matchExtReturns rettype res ts = do
+  let problem :: TypeM lore a
+      problem = bad $ TypeError $ unlines [ "Type annotation is"
+                                          , "  " ++ prettyTuple rettype
+                                          , "But result returns type"
+                                          , "  " ++ prettyTuple ts ]
+
+  let (ctx_res, val_res) = splitFromEnd (length rettype) res
+      (ctx_ts, val_ts) = splitFromEnd (length rettype) ts
+
+  unless (length val_res == length rettype) problem
+
+  let ctx_vals = zip ctx_res ctx_ts
+      instantiateExt i = case maybeNth i ctx_vals of
+                           Just (se, Prim (IntType Int32)) -> return se
+                           _ -> problem
+
+  rettype' <- instantiateShapes instantiateExt rettype
+
+  unless (rettype' == val_ts) problem
 
 validApply :: ArrayShape shape =>
               [TypeBase shape Uniqueness]
@@ -1093,7 +1072,7 @@ checkExtLambda (ExtLambda params body rettype) args =
                body) consumable $
       checkStms (bodyStms body) $ do
         checkResult $ bodyResult body
-        matchExtReturnType fname rettype $ bodyResult body
+        matchExtReturnType rettype $ bodyResult body
     else bad $ TypeError $
          "Existential lambda defined with " ++ show (length params) ++
          " parameters, but expected to take " ++ show (length args) ++ " arguments."
@@ -1105,9 +1084,10 @@ class (Attributes lore, CanBeAliased (Op lore)) => Checkable lore where
   checkFParamLore :: VName -> FParamAttr lore -> TypeM lore ()
   checkLParamLore :: VName -> LParamAttr lore -> TypeM lore ()
   checkLetBoundLore :: VName -> LetAttr lore -> TypeM lore ()
-  checkRetType :: RetType lore -> TypeM lore ()
+  checkRetType :: [RetType lore] -> TypeM lore ()
   checkOp :: OpWithAliases (Op lore) -> TypeM lore ()
   matchPattern :: Pattern (Aliases lore) -> Exp (Aliases lore) -> TypeM lore ()
   primFParam :: VName -> PrimType -> TypeM lore (FParam (Aliases lore))
   primLParam :: VName -> PrimType -> TypeM lore (LParam (Aliases lore))
-  matchReturnType :: Name -> RetType lore -> Result -> TypeM lore ()
+  matchReturnType :: [RetType lore] -> Result -> TypeM lore ()
+  matchBranchType :: [BranchType lore] -> Body (Aliases lore) -> TypeM lore ()

@@ -6,7 +6,7 @@ module Language.Futhark.TypeChecker.Monad
   , TypeM
   , runTypeM
   , askEnv
-  , askImportTable
+  , recursionPermitted
   , checkQualNameWithEnv
   , bindSpaced
 
@@ -37,7 +37,6 @@ module Language.Futhark.TypeChecker.Monad
   , anyPrimType
 
   , Namespace(..)
-  , ppSpace
   , intrinsicsNameMap
   , topLevelNameMap
   )
@@ -55,9 +54,10 @@ import Data.Maybe
 import Data.Either
 import Data.Ord
 import Data.Hashable
-
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
+
+import qualified System.FilePath.Posix as Posix
 
 import Prelude hiding (mapM)
 
@@ -69,17 +69,17 @@ import qualified Futhark.FreshNames
 -- instance for this type produces a human-readable description.
 data TypeError =
     TypeError SrcLoc String
-  | UnifyError SrcLoc (TypeBase Rank ()) SrcLoc (TypeBase Rank ())
+  | UnifyError SrcLoc (TypeBase () ()) SrcLoc (TypeBase () ())
   | UnexpectedType SrcLoc
-    (TypeBase Rank ()) [TypeBase Rank ()]
-  | ReturnTypeError SrcLoc Name (TypeBase Rank ()) (TypeBase Rank ())
+    (TypeBase () ()) [TypeBase () ()]
+  | ReturnTypeError SrcLoc Name (TypeBase () ()) (TypeBase () ())
   | DupDefinitionError Namespace Name SrcLoc SrcLoc
   | DupPatternError Name SrcLoc SrcLoc
   | InvalidPatternError (PatternBase NoInfo Name)
-    (TypeBase (ShapeDecl Name) ()) (Maybe String) SrcLoc
+    (TypeBase (DimDecl Name) ()) (Maybe String) SrcLoc
   | UnknownVariableError Namespace (QualName Name) SrcLoc
   | ParameterMismatch (Maybe (QualName Name)) SrcLoc
-    (Either Int [TypeBase Rank ()]) [TypeBase Rank ()]
+    (Either Int [TypeBase () ()]) [TypeBase () ()]
   | UseAfterConsume Name SrcLoc SrcLoc
   | IndexingError Int Int SrcLoc
   | CurriedConsumption (QualName Name) SrcLoc
@@ -88,13 +88,13 @@ data TypeError =
   | UniqueReturnAliased Name SrcLoc
   | PermutationError SrcLoc [Int] Int
   | DimensionNotInteger SrcLoc (QualName Name)
-  | InvalidUniqueness SrcLoc (TypeBase Rank ())
+  | InvalidUniqueness SrcLoc (TypeBase () ())
   | UndefinedType SrcLoc (QualName Name)
   | InvalidField SrcLoc Type String
   | UnderscoreUse SrcLoc (QualName Name)
   | ValueIsNotFunction SrcLoc (QualName Name) Type
   | FunctionIsNotValue SrcLoc (QualName Name)
-  | UniqueConstType SrcLoc Name (TypeBase Rank ())
+  | UniqueConstType SrcLoc Name (TypeBase () ())
   | UndeclaredFunctionReturnType SrcLoc (QualName Name)
   | UnappliedFunctor SrcLoc
 
@@ -160,9 +160,9 @@ instance Show TypeError where
     "A unique tuple element of return value of function " ++
     nameToString fname ++ " at " ++ locStr loc ++
     " is aliased to some other tuple component."
-  show (PermutationError loc perm rank) =
+  show (PermutationError loc perm r) =
     "The permutation (" ++ intercalate ", " (map show perm) ++
-    ") is not valid for array argument of rank " ++ show rank ++ " at " ++
+    ") is not valid for array argument of rank " ++ show r ++ " at " ++
     locStr loc ++ "."
   show (DimensionNotInteger loc name) =
     "Dimension declaration " ++ pretty name ++ " at " ++ locStr loc ++
@@ -205,10 +205,10 @@ data Mod = ModEnv Env
 data FunSig = FunSig TySet Mod MTy
             deriving (Show)
 
--- | Type parameters, list of parameter types, and return type.  The
--- type parameters are in scope in both parameter types and the return
--- type.
-type FunBinding = ([TypeParam], [StructType], StructType)
+-- | Type parameters, list of parameter types (optinally named), and
+-- return type.  The type parameters are in scope in both parameter
+-- types and the return type.
+type FunBinding = ([TypeParam], [(Maybe VName,StructType)], StructType)
 
 -- | Representation of a module type.
 data MTy = MTy { mtyAbs :: TySet
@@ -263,30 +263,37 @@ singleWarning loc problem = Warnings [(loc, problem)]
 
 type ImportTable = M.Map FilePath Env
 
+data Context = Context { contextEnv :: Env
+                       , contextImportTable :: ImportTable
+                       , contextFilePath :: FilePath
+                       , contextPermitRecursion :: Bool
+                       }
+
 -- | The type checker runs in this monad.
 newtype TypeM a = TypeM (RWST
-                         (Env, ImportTable) -- Reader
+                         Context -- Reader
                          Warnings           -- Writer
                          VNameSource        -- State
                          (Except TypeError) -- Inner monad
                          a)
   deriving (Monad, Functor, Applicative,
-            MonadReader (Env, ImportTable),
+            MonadReader Context,
             MonadWriter Warnings,
             MonadState VNameSource,
             MonadError TypeError)
 
-runTypeM :: Env -> ImportTable -> VNameSource -> TypeM a
+runTypeM :: Bool -> Env -> ImportTable -> FilePath -> VNameSource
+         -> TypeM a
          -> Either TypeError (a, Warnings, VNameSource)
-runTypeM env imports src (TypeM m) = do
-  (x, src', ws) <- runExcept $ runRWST m (env, imports) src
+runTypeM recurse env imports fpath src (TypeM m) = do
+  (x, src', ws) <- runExcept $ runRWST m (Context env imports fpath recurse) src
   return (x, ws, src')
 
-askImportTable :: TypeM ImportTable
-askImportTable = asks snd
-
 askEnv :: TypeM Env
-askEnv = asks fst
+askEnv = asks contextEnv
+
+recursionPermitted :: TypeM Bool
+recursionPermitted = asks contextPermitRecursion
 
 class MonadError TypeError m => MonadTypeChecker m where
   bad :: TypeError -> m a
@@ -296,6 +303,7 @@ class MonadError TypeError m => MonadTypeChecker m where
   newID :: Name -> m VName
 
   bindNameMap :: NameMap -> m a -> m a
+  localEnv :: Env -> m a -> m a
 
   checkQualName :: Namespace -> QualName Name -> SrcLoc -> m (QualName VName)
 
@@ -310,7 +318,7 @@ checkName space name loc = qualLeaf <$> checkQualName space (qualName name) loc
 
 -- | @require ts e@ causes a 'TypeError' if @typeOf e@ does not unify
 -- with one of the types in @ts@.  Otherwise, simply returns @e@.
-require :: MonadTypeChecker m => [TypeBase Rank ()] -> Exp -> m Exp
+require :: MonadTypeChecker m => [TypeBase () ()] -> Exp -> m Exp
 require ts e
   | any (toStruct (typeOf e) `similarTo`) ts = return e
   | otherwise = bad $ UnexpectedType (srclocOf e)
@@ -334,9 +342,12 @@ instance MonadTypeChecker TypeM where
 
   newID s = newName $ VName s 0
 
-  bindNameMap m = local $ \(env, imports) ->
-    (env { envNameMap = m <> envNameMap env },
-     imports)
+  bindNameMap m = local $ \ctx ->
+    let env = contextEnv ctx
+    in ctx { contextEnv = env { envNameMap = m <> envNameMap env } }
+
+  localEnv env = local $ \ctx ->
+    ctx { contextEnv = env <> contextEnv ctx }
 
   checkQualName space name loc = snd <$> checkQualNameWithEnv space name loc
 
@@ -347,9 +358,9 @@ instance MonadTypeChecker TypeM where
       Just (TypeAbbr ps def) -> return (qn', ps, def)
 
   lookupMod loc qn = do
-    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Structure qn loc
+    (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Term qn loc
     case M.lookup name $ envModTable scope of
-      Nothing -> bad $ UnknownVariableError Structure qn loc
+      Nothing -> bad $ UnknownVariableError Term qn loc
       Just m  -> return (qn', m)
 
   lookupMTy loc qn = do
@@ -358,10 +369,15 @@ instance MonadTypeChecker TypeM where
     where explode = bad $ UnknownVariableError Signature qn loc
 
   lookupImport loc file = do
-    imports <- askImportTable
-    case M.lookup file imports of
-      Nothing    -> bad $ TypeError loc $ "Unknown import \"" ++ file ++ "\""
+    imports <- asks contextImportTable
+    my_path <- asks contextFilePath
+    case M.lookup (my_path Posix.</> file) imports of
+      Nothing    -> bad $ TypeError loc $ "Unknown import \"" ++ file ++ "\"" ++ extra
       Just scope -> return scope
+      where extra | ".." `elem` Posix.splitDirectories file =
+                      "\nNote: '..' is not supported in file imports."
+                  | otherwise =
+                      ""
 
   lookupVar loc qn = do
     (env, qn'@(QualName _ name)) <- checkQualNameWithEnv Term qn loc
@@ -382,7 +398,7 @@ checkQualNameWithEnv space qn@(QualName quals name) loc = do
               bad $ UnknownVariableError space qn loc
 
         descend scope (q:qs)
-          | Just q' <- M.lookup (Structure, q) $ envNameMap scope,
+          | Just q' <- M.lookup (Term, q) $ envNameMap scope,
             Just res <- M.lookup q' $ envModTable scope =
               case res of
                 ModEnv q_scope -> descend q_scope qs
@@ -393,36 +409,34 @@ checkQualNameWithEnv space qn@(QualName quals name) loc = do
 badOnLeft :: MonadTypeChecker m => Either TypeError a -> m a
 badOnLeft = either bad return
 
-anySignedType :: [TypeBase Rank ()]
+anySignedType :: [TypeBase () ()]
 anySignedType = map (Prim . Signed) [minBound .. maxBound]
 
-anyUnsignedType :: [TypeBase Rank ()]
+anyUnsignedType :: [TypeBase () ()]
 anyUnsignedType = map (Prim . Unsigned) [minBound .. maxBound]
 
-anyIntType :: [TypeBase Rank ()]
+anyIntType :: [TypeBase () ()]
 anyIntType = anySignedType ++ anyUnsignedType
 
-anyFloatType :: [TypeBase Rank ()]
+anyFloatType :: [TypeBase () ()]
 anyFloatType = map (Prim . FloatType) [minBound .. maxBound]
 
-anyNumberType :: [TypeBase Rank ()]
+anyNumberType :: [TypeBase () ()]
 anyNumberType = anyIntType ++ anyFloatType
 
-anyPrimType :: [TypeBase Rank ()]
+anyPrimType :: [TypeBase () ()]
 anyPrimType = Prim Bool : anyIntType ++ anyFloatType
 
 --- Name handling
 
 data Namespace = Term -- ^ Functions and values.
                | Type
-               | Structure
                | Signature
                deriving (Eq, Ord, Show, Enum)
 
 ppSpace :: Namespace -> String
 ppSpace Term = "value"
 ppSpace Type = "type"
-ppSpace Structure = "module"
 ppSpace Signature = "module type"
 
 instance Hashable Namespace where
@@ -442,5 +456,5 @@ topLevelNameMap = M.filterWithKey (\k _ -> atTopLevel k) intrinsicsNameMap
                 binop_names = S.fromList $ map (nameFromString . pretty)
                               [minBound..(maxBound::BinOp)]
                 unop_names = S.fromList $ map nameFromString ["~", "!"]
-                fun_names = S.fromList $ map nameFromString ["shape", "scatter", "replicate", "iota"]
+                fun_names = S.fromList $ map nameFromString ["shape"]
         atTopLevel _         = False

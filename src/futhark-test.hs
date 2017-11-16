@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TupleSections, FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings, FlexibleContexts #-}
 -- | This program is a convenience utility for running the Futhark
 -- test suite, and its test programs.
 module Main (main) where
@@ -37,6 +37,7 @@ import Futhark.Pipeline
 import Futhark.Compiler
 import Futhark.Test
 import Futhark.Passes
+import Language.Futhark.Futlib.Prelude
 
 import Futhark.Util.Options
 
@@ -92,7 +93,7 @@ optimisedProgramMetrics pipeline program =
                    GpuPipeline ->
                      check gpuPipeline
   where check pipeline' = do
-          res <- io $ runFutharkM (runPipelineOnProgram structTestConfig pipeline' program) False
+          res <- io $ runFutharkM (runPipelineOnProgram structTestConfig preludeBasis pipeline' program) False
           case res of
             Left err ->
               throwError $ T.pack $ show err

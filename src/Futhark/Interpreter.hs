@@ -50,7 +50,7 @@ data InterpreterError =
       -- ^ First @Int@ is old shape, second is attempted new shape.
     | ZipError [Int]
       -- ^ The arguments to @zip@ were of different lengths.
-    | AssertFailed SrcLoc
+    | AssertFailed String (SrcLoc, [SrcLoc])
       -- ^ Assertion failed at this location.
     | TypeError String
       -- ^ Some value was of an unexpected type.
@@ -75,7 +75,7 @@ instance Show InterpreterError where
     "Split not valid for sizes " ++ show sizes ++
     " on array '" ++ var ++ "', with shape " ++ show arrsz ++ "."
   show (NegativeIota n) =
-    "Argument " ++ show n ++ " to iota at is negative."
+    "Length argument " ++ show n ++ " to iota at is negative."
   show (NegativeReplicate n) =
     "Argument " ++ show n ++ " to replicate is negative."
   show (TypeError s) =
@@ -85,8 +85,9 @@ instance Show InterpreterError where
     ", from " ++ show shape ++ " to " ++ show newshape
   show (ZipError lengths) =
     "Array arguments to zip must have same length, but arguments have lengths " ++ intercalate ", " (map show lengths) ++ "."
-  show (AssertFailed loc) =
-    "Assertion failed at " ++ locStr loc ++ "."
+  show (AssertFailed msg (loc,locs)) =
+    "Assertion failed at " ++ stacktrace ++ ":\n" ++ msg
+    where stacktrace = intercalate " -> " (reverse $ map locStr $ loc:locs)
   show DivisionByZero =
     "Division by zero."
 
@@ -128,7 +129,7 @@ bindVar :: Bindage -> Value
 bindVar BindVar val =
   return val
 
-bindVar (BindInPlace _ src slice) val = do
+bindVar (BindInPlace src slice) val = do
   srcv <- lookupVar src
   slice' <- mapM evalDimIndex slice
   case srcv of
@@ -255,6 +256,7 @@ runFun fname mainargs prog = do
   case (funDefByName fname prog, M.lookup fname ftable) of
     (Nothing, Nothing) -> Left $ MissingEntryPoint fname
     (Just fundec, _) ->
+      takeLast (length $ funDefRetType fundec) <$>
       runThisFun fundec mainargs ftable
     (_ , Just fun) -> -- It's a builtin function, it'll do its own
                       -- error checking.
@@ -273,7 +275,8 @@ runFunWithShapes fname valargs prog = do
     (Nothing, Nothing) -> Left $ MissingEntryPoint fname
     (Just fundec, _) ->
       let args' = shapes (funDefParams fundec) ++ valargs
-      in runThisFun fundec args' ftable
+      in takeLast (length $ funDefRetType fundec) <$>
+         runThisFun fundec args' ftable
     (_ , Just fun) -> -- It's a builtin function, it'll do its own
                       -- error checking.
       runFutharkM (fun valargs) futharkenv
@@ -331,6 +334,8 @@ builtins = M.fromList $ map namify
            ,("atan2_32", builtin "atan2_32")
            ,("isinf32", builtin "isinf32")
            ,("isnan32", builtin "isnan32")
+           ,("to_bits32", builtin "to_bits32")
+           ,("from_bits32", builtin "from_bits32")
 
            ,("sqrt64", builtin "sqrt64")
            ,("log64", builtin "log64")
@@ -343,56 +348,19 @@ builtins = M.fromList $ map namify
            ,("atan2_64", builtin "atan2_64")
            ,("isinf64", builtin "isinf64")
            ,("isnan64", builtin "isnan64")
+           ,("to_bits64", builtin "to_bits64")
+           ,("from_bits64", builtin "from_bits64")
            ]
   where namify (k,v) = (nameFromString k, v)
 
 builtin :: String -> [Value] -> FutharkM [Value]
-builtin "sqrt32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ sqrt x]
-builtin "log32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ log x]
-builtin "exp32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ exp x]
-builtin "cos32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ cos x]
-builtin "sin32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ sin x]
-builtin "acos32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ acos x]
-builtin "asin32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ asin x]
-builtin "atan32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ FloatValue $ Float32Value $ atan x]
-builtin "atan2_32" [PrimVal (FloatValue (Float32Value x)),
-                    PrimVal (FloatValue (Float32Value y))] =
-  return [PrimVal $ FloatValue $ Float32Value $ atan2 x y]
-builtin "isnan32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ BoolValue $ isNaN x]
-builtin "isinf32" [PrimVal (FloatValue (Float32Value x))] =
-  return [PrimVal $ BoolValue $ isInfinite x]
-builtin "sqrt64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ sqrt x]
-builtin "log64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ log x]
-builtin "exp64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ exp x]
-builtin "cos64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ cos x]
-builtin "sin64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ sin x]
-builtin "acos64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ acos x]
-builtin "asin64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ asin x]
-builtin "atan64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ FloatValue $ Float64Value $ atan x]
-builtin "atan2_64" [PrimVal (FloatValue (Float64Value x)),
-                    PrimVal (FloatValue (Float64Value y))] =
-  return [PrimVal $ FloatValue $ Float64Value $ atan2 x y]
-builtin "isnan64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ BoolValue $ isNaN x]
-builtin "isinf64" [PrimVal (FloatValue (Float64Value x))] =
-  return [PrimVal $ BoolValue $ isInfinite x]
+builtin fname args
+  | Just args' <- mapM isPrimValue args,
+    Just (_, _, fun) <- M.lookup fname primFuns,
+    Just result <- fun args' =
+      return [PrimVal result]
+  where isPrimValue (PrimVal v) = Just v
+        isPrimValue _ = Nothing
 builtin fname args =
   bad $ InvalidFunctionArguments (nameFromString fname) Nothing $
         map (rankShaped . valueType) args
@@ -428,13 +396,14 @@ evalBody (Body () (Let pat _ e:bnds) res) = do
   where patElems = patternElements pat
 
 evalExp :: Exp -> FutharkM [Value]
-evalExp (If e1 e2 e3 rettype) = do
+evalExp (If e1 e2 e3 info) = do
   v <- evalSubExp e1
   vs <- case v of PrimVal (BoolValue True)  -> evalBody e2
                   PrimVal (BoolValue False) -> evalBody e3
                   _                       -> bad $ TypeError "evalExp If"
-  return $ valueShapeContext rettype vs ++ vs
-evalExp (Apply fname args rettype) = do
+  return $ valueShapeContext (bodyTypeValues $ ifReturns info) vs ++ vs
+
+evalExp (Apply fname args rettype _) = do
   args' <- mapM (evalSubExp . fst) args
   vs <- evalFuncall fname args'
   return $ valueShapeContext (retTypeValues rettype) vs ++ vs
@@ -525,7 +494,7 @@ evalBasicOp unop@(UnOp op e) = do
     Just v' -> return [PrimVal v']
     Nothing -> bad $ TypeError $ "Cannot UnOp: " ++ unwords [pretty unop, pretty v]
 
-evalBasicOp (Index _ ident slice) = do
+evalBasicOp (Index ident slice) = do
   v <- lookupVar ident
   slice' <- mapM evalDimIndex slice
   pure <$> indexArrayValue v slice'
@@ -546,7 +515,7 @@ evalBasicOp (Iota e x s et) = do
                              [x'',x''+s''..x''+(toInteger e'-1)*s''])
                    (IntType et) [fromIntegral e']]
       | otherwise ->
-        bad $ NegativeIota $ valueIntegral x'
+          bad $ NegativeIota $ fromIntegral e'
     _ -> bad $ TypeError "evalBasicOp Iota"
 
 evalBasicOp (Replicate (Shape ds) e2) = do
@@ -577,7 +546,7 @@ evalBasicOp (Scratch bt shape) = do
   return [ArrayVal (listArray (0,fromIntegral nelems-1) vals) bt shape']
   where v = blankPrimValue bt
 
-evalBasicOp e@(Reshape _ shapeexp arrexp) = do
+evalBasicOp e@(Reshape shapeexp arrexp) = do
   shape <- mapM (asInt "evalBasicOp Reshape" <=< evalSubExp) $ newDims shapeexp
   arr <- lookupVar arrexp
   case arr of
@@ -589,19 +558,19 @@ evalBasicOp e@(Reshape _ shapeexp arrexp) = do
     _ ->
       bad $ TypeError "Reshape given a non-array argument"
 
-evalBasicOp (Rearrange _ perm arrexp) =
+evalBasicOp (Rearrange perm arrexp) =
   single . permuteArray perm <$> lookupVar arrexp
 
-evalBasicOp (Rotate _ offsets arrexp) = do
+evalBasicOp (Rotate offsets arrexp) = do
   offsets' <- mapM (asInt "evalBasicOp rotate" <=< evalSubExp) offsets
   single . rotateArray offsets' <$> lookupVar arrexp
 
-evalBasicOp (Split _ i sizeexps arrexp) = do
+evalBasicOp (Split i sizeexps arrexp) = do
   sizes <- mapM (asInt "evalBasicOp Split" <=< evalSubExp) sizeexps
   arr <- lookupVar arrexp
   return $ splitArray i sizes arr
 
-evalBasicOp (Concat _ i arr1exp arr2exps _) = do
+evalBasicOp (Concat i arr1exp arr2exps _) = do
   arr1  <- lookupVar arr1exp
   arr2s <- mapM lookupVar arr2exps
   return [foldl (concatArrays i) arr1 arr2s]
@@ -610,14 +579,14 @@ evalBasicOp (Copy v) = single <$> lookupVar v
 
 evalBasicOp (Manifest _ v) = single <$> lookupVar v
 
-evalBasicOp (Assert e loc) = do
+evalBasicOp (Assert e msg loc) = do
   v <- evalSubExp e
   case v of PrimVal (BoolValue True) ->
               return [PrimVal Checked]
             _ ->
-              bad $ AssertFailed loc
+              bad $ AssertFailed msg loc
 
-evalBasicOp (Partition _ n flags arrs) = do
+evalBasicOp (Partition n flags arrs) = do
   flags_elems <- arrToList =<< lookupVar flags
   arrvs <- mapM lookupVar arrs
   let ets = map (elemType . valueType) arrvs
@@ -650,7 +619,7 @@ evalBasicOp (Partition _ n flags arrs) = do
 
 evalSOAC :: SOAC SOACS -> FutharkM [Value]
 
-evalSOAC (Stream _ w form elam arrs) = do
+evalSOAC (Stream w form elam arrs) = do
   let accs = getStreamAccums form
   accvals <- mapM evalSubExp accs
   arrvals <- mapM lookupVar  arrs
@@ -664,17 +633,17 @@ evalSOAC (Stream _ w form elam arrs) = do
   vs <- fun (chunkval:accvals++arrvals)
   return $ valueShapeContext elam_rtp vs ++ vs
 
-evalSOAC (Map _ w fun arrexps) = do
+evalSOAC (Map w fun arrexps) = do
   vss' <- mapM (applyLambda fun) =<< soacArrays w arrexps
   arrays (lambdaReturnType fun) vss'
 
-evalSOAC (Reduce _ w _ fun inputs) = do
+evalSOAC (Reduce w _ fun inputs) = do
   let (accexps, arrexps) = unzip inputs
   startaccs <- mapM evalSubExp accexps
   let foldfun acc x = applyLambda fun $ acc ++ x
   foldM foldfun startaccs =<< soacArrays w arrexps
 
-evalSOAC (Scan _ w fun inputs) = do
+evalSOAC (Scan w fun inputs) = do
   let (accexps, arrexps) = unzip inputs
   startvals <- mapM evalSubExp accexps
   (acc, vals') <- foldM scanfun (startvals, []) =<<
@@ -684,10 +653,10 @@ evalSOAC (Scan _ w fun inputs) = do
             acc' <- applyLambda fun $ acc ++ x
             return (acc', acc' : l)
 
-evalSOAC (Redomap cs w _ redfun foldfun accexp arrexps) = do
+evalSOAC (Redomap w _ redfun foldfun accexp arrexps) = do
   -- SO LAZY: redomap is scanomap, after which we index the last elements.
   w' <- asInt "evalBasicOp Redomap" =<< evalSubExp w
-  vs <- evalSOAC $  Scanomap cs w redfun foldfun accexp arrexps
+  vs <- evalSOAC $  Scanomap w redfun foldfun accexp arrexps
   let (acc_arrs, arrs) = splitAt (length accexp) vs
   accs <- if w' == 0
           then mapM evalSubExp accexp
@@ -696,7 +665,7 @@ evalSOAC (Redomap cs w _ redfun foldfun accexp arrexps) = do
                  map (unitSlice 0) (drop 1 $ valueShape acc_arr)
   return $ accs++arrs
 
-evalSOAC (Scanomap _ w _ innerfun accexp arrexps) = do
+evalSOAC (Scanomap w _ innerfun accexp arrexps) = do
   startaccs <- mapM evalSubExp accexp
   if res_len == acc_len
   then do (acc, vals) <- foldM foldfun (startaccs, []) =<< soacArrays w arrexps
@@ -722,7 +691,7 @@ evalSOAC (Scanomap _ w _ innerfun accexp arrexps) = do
                 acc_arr = zipWith (:) res_arr arr
             return (res_acc, res_acc:l, acc_arr)
 
-evalSOAC (Scatter _cs len lam ivs as) = do
+evalSOAC (Scatter len lam ivs as) = do
 
   let valInt :: Value -> FutharkM Int
       valInt (PrimVal (IntValue (Int32Value l))) = return $ fromIntegral l
@@ -795,7 +764,7 @@ checkReturnShapes :: [TypeBase ExtShape u] -> [Value] -> FutharkM ()
 checkReturnShapes = zipWithM_ checkShape
   where checkShape t val = do
           let valshape = map (PrimVal . IntValue . Int32Value . fromIntegral) $ valueShape val
-              retdims = extShapeDims $ arrayShape t
+              retdims = shapeDims $ arrayShape t
               evalExtDim (Free se) = do v <- evalSubExp se
                                         return $ Just (se, v)
               evalExtDim (Ext _)   = return Nothing

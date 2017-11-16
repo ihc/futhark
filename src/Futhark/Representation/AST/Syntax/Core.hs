@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- | The most primitive ("core") aspects of the AST.  Split out of
 -- "Futhark.Representation.AST.Syntax" in order for
 -- "Futhark.Representation.AST.Annotations" to use these definitions.  This
@@ -12,9 +13,11 @@ module Futhark.Representation.AST.Syntax.Core
          -- * Types
          , Uniqueness(..)
          , NoUniqueness(..)
-         , Shape(..)
-         , ExtDimSize(..)
-         , ExtShape(..)
+         , ShapeBase(..)
+         , Shape
+         , Ext(..)
+         , ExtSize
+         , ExtShape
          , Rank(..)
          , ArrayShape(..)
          , Space (..)
@@ -32,7 +35,7 @@ module Futhark.Representation.AST.Syntax.Core
 
          -- * Abstract syntax tree
          , Ident (..)
-         , Certificates
+         , Certificates(..)
          , SubExp(..)
          , ParamT (..)
          , Param
@@ -65,20 +68,26 @@ import Prelude
 import Language.Futhark.Core
 import Futhark.Representation.Primitive
 
--- | The size of an array type as a list of its dimension sizes.  If a
--- variable, that variable must be in scope where this array is used.
-newtype Shape = Shape { shapeDims :: [SubExp] }
-              deriving (Eq, Ord, Show)
+-- | The size of an array type as a list of its dimension sizes, with
+-- the type of sizes being parametric.
+newtype ShapeBase d = Shape { shapeDims :: [d] }
+                    deriving (Eq, Ord, Show)
+
+-- | The size of an array as a list of subexpressions.  If a variable,
+-- that variable must be in scope where this array is used.
+type Shape = ShapeBase SubExp
+
+-- | Something that may be existential.
+data Ext a = Ext Int
+           | Free a
+           deriving (Eq, Ord, Show)
 
 -- | The size of this dimension.
-data ExtDimSize = Free SubExp -- ^ Some known dimension.
-                | Ext Int -- ^ Existentially quantified.
-                  deriving (Eq, Ord, Show)
+type ExtSize = Ext SubExp
 
 -- | Like 'Shape' but some of its elements may be bound in a local
 -- environment instead.  These are denoted with integral indices.
-newtype ExtShape = ExtShape { extShapeDims :: [ExtDimSize] }
-                 deriving (Eq, Ord, Show)
+type ExtShape = ShapeBase ExtSize
 
 -- | The size of an array type as merely the number of dimensions,
 -- with no further information.
@@ -95,23 +104,22 @@ class (Monoid a, Eq a, Ord a) => ArrayShape a where
   -- | Check whether one shape if a subset of another shape.
   subShapeOf :: a -> a -> Bool
 
-instance Monoid Shape where
+instance Monoid (ShapeBase d) where
   mempty = Shape mempty
   Shape l1 `mappend` Shape l2 = Shape $ l1 `mappend` l2
 
-instance ArrayShape Shape where
+instance Functor ShapeBase where
+  fmap f = Shape . map f . shapeDims
+
+instance ArrayShape (ShapeBase SubExp) where
   shapeRank (Shape l) = length l
   stripDims n (Shape dims) = Shape $ drop n dims
   subShapeOf = (==)
 
-instance Monoid ExtShape where
-  mempty = ExtShape mempty
-  ExtShape l1 `mappend` ExtShape l2 = ExtShape $ l1 `mappend` l2
-
-instance ArrayShape ExtShape where
-  shapeRank (ExtShape l) = length l
-  stripDims n (ExtShape dims) = ExtShape $ drop n dims
-  subShapeOf (ExtShape ds1) (ExtShape ds2) =
+instance ArrayShape (ShapeBase ExtSize) where
+  shapeRank (Shape l) = length l
+  stripDims n (Shape dims) = Shape $ drop n dims
+  subShapeOf (Shape ds1) (Shape ds2) =
     -- Must agree on Free dimensions, and ds1 may not be existential
     -- where ds2 is Free.  Existentials must also be congruent.
     length ds1 == length ds2 &&
@@ -210,7 +218,12 @@ instance Hashable Ident where
   hashWithSalt salt = hashWithSalt salt . identName
 
 -- | A list of names used for certificates in some expressions.
-type Certificates = [VName]
+newtype Certificates = Certificates { unCertificates :: [VName] }
+                     deriving (Eq, Ord, Show)
+
+instance Monoid Certificates where
+  mempty = Certificates mempty
+  Certificates x `mappend` Certificates y = Certificates (x `mappend` y)
 
 -- | A subexpression is either a scalar constant or a variable.  One
 -- important property is that evaluation of a subexpression is
@@ -282,14 +295,12 @@ unitSlice offset n = DimSlice offset n 1
 -- | How a name in a let-binding is bound - either as a plain
 -- variable, or in the form of an in-place update.
 data Bindage = BindVar -- ^ Bind as normal.
-             | BindInPlace Certificates VName (Slice SubExp)
+             | BindInPlace VName (Slice SubExp)
                -- ^ Perform an in-place update, in which the value
                -- being bound is inserted at the given index in the
                -- array referenced by the 'VName'.  Note that the
                -- result of the binding is the entire array, not just
-               -- the value that has been inserted..  The
-               -- 'Certificates' contain bounds checking certificates
-               -- (if necessary).
+               -- the value that has been inserted.
                   deriving (Ord, Show, Eq)
 
 -- | An element of a pattern - consisting of an name (essentially a

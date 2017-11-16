@@ -1,5 +1,0 @@
-flags: {}
-extra-package-dbs: []
-packages:
-- '.'
-resolver: lts-7.22

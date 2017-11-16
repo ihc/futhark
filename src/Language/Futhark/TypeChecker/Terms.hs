@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts, TupleSections #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
 -- | Facilities for type-checking Futhark terms.  Checking a term
 -- requires a little more context to track uniqueness and such.
 module Language.Futhark.TypeChecker.Terms
@@ -22,7 +22,7 @@ import Data.Traversable (mapM)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 
-import Prelude hiding (mapM)
+import Prelude hiding (mod, mapM)
 
 import Language.Futhark
 import Language.Futhark.TypeChecker.Monad hiding (ValBinding, BoundV, BoundF, checkQualNameWithEnv)
@@ -111,7 +111,7 @@ altOccurences occurs1 occurs2 =
 data ValBinding = BoundV Type
                 | BoundF FunBinding Occurences
                 -- ^ The occurences is non-empty only for local functions.
-                | OverloadedF [([TypeBase Rank ()],FunBinding)]
+                | OverloadedF [([TypeBase () ()],FunBinding)]
                 | EqualityF
                 | OpaqueF
                 | WasConsumed SrcLoc
@@ -149,10 +149,11 @@ newtype TermTypeM a = TermTypeM (ReaderT
             MonadWriter Occurences,
             MonadError TypeError)
 
-runTermTypeM :: TermTypeM a -> TypeM a
+runTermTypeM :: TermTypeM a -> TypeM (a, Occurences)
 runTermTypeM (TermTypeM m) = do
   initial_scope <- (initialTermScope<>) <$> (envToTermScope <$> askEnv)
-  fst <$> runWriterT (runReaderT m initial_scope)
+  runWriterT (runReaderT m initial_scope)
+
 
 liftTypeM :: TypeM a -> TermTypeM a
 liftTypeM = TermTypeM . lift . lift
@@ -162,13 +163,15 @@ initialTermScope = TermScope initialVtable mempty topLevelNameMap
   where initialVtable = M.fromList $ mapMaybe addIntrinsicF $ M.toList intrinsics
 
         addIntrinsicF (name, IntrinsicMonoFun ts t) =
-          Just (name, BoundF ([], map Prim ts, Prim t) mempty)
+          Just (name, BoundF ([], zip (repeat Nothing) $ map Prim ts, Prim t) mempty)
         addIntrinsicF (name, IntrinsicOverloadedFun variants) =
           Just (name, OverloadedF $ map frob variants)
-          where frob (pts, rt) = (map Prim pts, ([], map Prim pts, Prim rt))
+          where frob (pts, rt) = (map Prim pts,
+                                  ([], zip (repeat Nothing) $ map Prim pts, Prim rt))
         addIntrinsicF (name, IntrinsicPolyFun tvs pts rt) =
           Just (name, BoundF (tvs,
-                              map vacuousShapeAnnotations pts,
+                              zip (repeat Nothing) $
+                               map vacuousShapeAnnotations pts,
                               vacuousShapeAnnotations rt)
                       mempty)
         addIntrinsicF (name, IntrinsicEquality) =
@@ -187,6 +190,15 @@ instance MonadTypeChecker TermTypeM where
 
   bindNameMap m = local $ \scope ->
     scope { scopeNameMap = m <> scopeNameMap scope }
+
+  localEnv env (TermTypeM m) = do
+    cur_scope <- ask
+    let cur_scope' =
+          cur_scope { scopeNameMap = scopeNameMap cur_scope `M.difference` envNameMap env }
+    (x,occs) <- liftTypeM $ localEnv env $
+                runWriterT (runReaderT m cur_scope')
+    tell occs
+    return x
 
   lookupType loc qn = do
     (scope, qn'@(QualName _ name)) <- checkQualNameWithEnv Type qn loc
@@ -215,7 +227,7 @@ checkQualNameWithEnv space qn@(QualName [q] _) loc
   | nameToString q == "intrinsics" = do
       -- Check if we are referring to the magical intrinsics
       -- module.
-      (_, QualName _ q') <- liftTypeM $ TypeM.checkQualNameWithEnv Structure (QualName [] q) loc
+      (_, QualName _ q') <- liftTypeM $ TypeM.checkQualNameWithEnv Term (QualName [] q) loc
       if baseTag q' <= maxIntrinsicTag
         then checkIntrinsic space qn loc
         else checkReallyQualName space qn loc
@@ -261,7 +273,11 @@ lookupFunction qn argtypes loc = do
     Just OpaqueF
       | [t] <- argtypes ->
           let t' = vacuousShapeAnnotations $ toStruct t
-          in return (qn', ([], [t' `setUniqueness` Nonunique], t' `setUniqueness` Nonunique), mempty)
+          in return (qn',
+                     ([],
+                      [(Nothing, t' `setUniqueness` Nonunique)],
+                      t' `setUniqueness` Nonunique),
+                     mempty)
       | otherwise ->
           bad $ TypeError loc "Opaque function takes just a single argument."
     Just EqualityF
@@ -270,7 +286,8 @@ lookupFunction qn argtypes loc = do
         concreteType t2,
         t1 == t2 ->
           return (qn', ([],
-                        map (vacuousShapeAnnotations . toStruct) [t1, t2],
+                        zip (repeat Nothing) $
+                         map (vacuousShapeAnnotations . toStruct) [t1, t2],
                         Prim Bool),
                        mempty)
       | otherwise ->
@@ -369,33 +386,36 @@ bindingIdent (Ident v NoInfo vloc) t m =
 bindingPatternGroup :: [UncheckedTypeParam]
                     -> [(UncheckedPattern, InferredType)]
                     -> ([TypeParam] -> [Pattern] -> TermTypeM a) -> TermTypeM a
-bindingPatternGroup tps ps m =
-  checkTypeParams tps $ \tps' -> bindingTypeParams tps' $
-  checkPatternGroup tps' ps $ \ps' ->
-  binding (S.toList $ S.unions $ map patIdentSet ps') $ do
-    -- Perform an observation of every type parameter and every
-    -- declared dimension.  This prevents unused-name warnings for
-    -- otherwise unused dimensions.
-    mapM_ observe $ concatMap patternDims ps' ++ mapMaybe typeParamIdent tps'
+bindingPatternGroup tps orig_ps m = do
+  checkForDuplicateNames $ map fst orig_ps
+  checkTypeParams tps $ \tps' -> bindingTypeParams tps' $ do
+    let descend ps' ((p,t):ps) =
+          checkPattern p t $ \p' ->
+            binding (S.toList $ patIdentSet p') $ descend (p':ps') ps
+        descend ps' [] = do
+          -- Perform an observation of every type parameter.  This
+          -- prevents unused-name warnings for otherwise unused
+          -- dimensions.
+          mapM_ observe $ mapMaybe typeParamIdent tps'
+          checkTypeParamsUsed tps' ps'
 
-    checkTypeParamsUsed tps' ps'
+          m tps' $ reverse ps'
 
-    m tps' ps'
+    descend [] orig_ps
 
 bindingPattern :: [UncheckedTypeParam]
                -> PatternBase NoInfo Name -> InferredType
                -> ([TypeParam] -> Pattern -> TermTypeM a) -> TermTypeM a
-bindingPattern tps p t m =
+bindingPattern tps p t m = do
+  checkForDuplicateNames [p]
   checkTypeParams tps $ \tps' -> bindingTypeParams tps' $
-  checkPattern tps' p t $ \p' ->
-  binding (S.toList $ patIdentSet p') $ do
-    -- Perform an observation of every declared dimension.  This
-    -- prevents unused-name warnings for otherwise unused dimensions.
-    mapM_ observe $ patternDims p'
+    checkPattern p t $ \p' -> binding (S.toList $ patIdentSet p') $ do
+      -- Perform an observation of every declared dimension.  This
+      -- prevents unused-name warnings for otherwise unused dimensions.
+      mapM_ observe $ patternDims p'
+      checkTypeParamsUsed tps' [p']
 
-    checkTypeParamsUsed tps' [p']
-
-    m tps' p'
+      m tps' p'
 
 checkTypeParamsUsed :: [TypeParam] -> [Pattern] -> TermTypeM ()
 checkTypeParamsUsed tps ps = do
@@ -431,7 +451,6 @@ patternDims (PatternAscription p (TypeDecl _ (Info t))) =
   where dimIdent _ AnyDim            = Nothing
         dimIdent _ (ConstDim _)      = Nothing
         dimIdent _ NamedDim{}        = Nothing
-        dimIdent loc (BoundDim name) = Just $ Ident name (Info (Prim (Signed Int32))) loc
 patternDims _ = []
 
 data PatternUses = PatternUses { patternDimUses :: [QualName VName]
@@ -483,27 +502,22 @@ checkExp (RecordLit fs loc) = do
   fs' <- evalStateT (mapM checkField fs) mempty
 
   return $ RecordLit fs' loc
-  where checkField (RecordField f e rloc) = do
-          warnIfAlreadySet f rloc
+  where checkField (RecordFieldExplicit f e rloc) = do
+          errIfAlreadySet f rloc
           modify $ M.insert f rloc
-          RecordField f <$> lift (checkExp e) <*> pure rloc
-        checkField (RecordRecord e) = do
-          e' <- lift $ checkExp e
-          case typeOf e' of
-            Record rfs -> do
-              mapM_ (`warnIfAlreadySet` srclocOf e) $ M.keys rfs
-              return $ RecordRecord e'
-            t ->
-              lift $ bad $ TypeError loc $
-              "Expression in record literal must be of record type, but is " ++ pretty t
+          RecordFieldExplicit f <$> lift (checkExp e) <*> pure rloc
+        checkField (RecordFieldImplicit name NoInfo rloc) = do
+          errIfAlreadySet name rloc
+          (QualName _ name', t) <- lift $ lookupVar rloc $ qualName name
+          modify $ M.insert name rloc
+          return $ RecordFieldImplicit name' (Info t) rloc
 
-        warnIfAlreadySet f rloc = do
+        errIfAlreadySet f rloc = do
           maybe_sloc <- gets $ M.lookup f
           case maybe_sloc of
             Just sloc ->
-              lift $ warn sloc $ "This value for field " ++ pretty f ++
-              " is redundant, due to an overriding definition of the same field at " ++
-              locStr rloc ++ "."
+              throwError $ TypeError rloc $ "Field '" ++ pretty f ++
+              " previously defined at " ++ locStr sloc ++ "."
             Nothing -> return ()
 
 checkExp (ArrayLit es _ loc) = do
@@ -521,12 +535,32 @@ checkExp (ArrayLit es _ loc) = do
 
   return $ ArrayLit es' (Info et) loc
 
+checkExp (Range start maybe_step end loc) = do
+  start' <- require anyIntType =<< checkExp start
+  let start_t = toStructural $ typeOf start'
+  maybe_step' <- case maybe_step of
+    Nothing -> return Nothing
+    Just step -> do
+      let warning = warn loc "First and second element of range are identical, this will produce an empty array."
+      case (start, step) of
+        (Literal x _, Literal y _) -> when (x == y) warning
+        (Var x_name _ _, Var y_name _ _) -> when (x_name == y_name) warning
+        _ -> return ()
+      Just <$> (require [start_t] =<< checkExp step)
+
+  end' <- case end of
+    DownToExclusive e -> DownToExclusive <$> (require [start_t] =<< checkExp e)
+    UpToExclusive e -> UpToExclusive <$> (require [start_t] =<< checkExp e)
+    ToInclusive e -> ToInclusive <$> (require [start_t] =<< checkExp e)
+
+  return $ Range start' maybe_step' end' loc
+
 checkExp (Empty decl loc) = do
-  decl' <- checkTypeDecl loc decl
+  decl' <- checkTypeDecl decl
   return $ Empty decl' loc
 
 checkExp (Ascript e decl loc) = do
-  decl' <- checkTypeDecl loc decl
+  decl' <- checkTypeDecl decl
   e' <- require [removeShapeAnnotations $ unInfo $ expandedType decl']
         =<< checkExp e
   return $ Ascript e' decl' loc
@@ -539,7 +573,7 @@ checkExp (BinOp op (e1,_) (e2,_) NoInfo loc) = do
     lookupFunction op (map argType [e1_arg,e2_arg]) loc
 
   case paramtypes of
-    [e1_pt, e2_pt] -> do
+    [(_, e1_pt), (_, e2_pt)] -> do
       occur closure
       (_, rettype') <-
         checkFuncall (Just op) loc (tparams, paramtypes, ftype) [e1_arg, e2_arg]
@@ -565,10 +599,41 @@ checkExp (If e1 e2 e3 _ pos) =
 checkExp (Parens e loc) =
   Parens <$> checkExp e <*> pure loc
 
+checkExp (QualParens modname e loc) = do
+  (modname',mod) <- lookupMod loc modname
+  case mod of
+    ModEnv env -> localEnv env $ do
+      e' <- checkExp e
+      return $ QualParens modname' e' loc
+    ModFun{} ->
+      bad $ TypeError loc $ "Module " ++ pretty modname ++ " is a parametric module."
+
 checkExp (Var qn NoInfo loc) = do
-  (qn'@(QualName _ name'), t) <- lookupVar loc qn
-  observe $ Ident name' (Info t) loc
-  return $ Var qn' (Info t) loc
+  -- The qualifiers of a variable is divided into two parts: first a
+  -- possibly-empty sequence of module qualifiers, followed by a
+  -- possible-empty sequence of record field accesses.  We use scope
+  -- information to perform the split, by taking qualifiers off the
+  -- end until we find a module.
+
+  (qn', t, fields) <- findRootVar (qualQuals qn) (qualLeaf qn)
+  observe $ Ident (qualLeaf qn') (Info t) loc
+
+  foldM checkField (Var qn' (Info t) loc) fields
+  where findRootVar qs name = do
+          r <- (Right <$> lookupVar loc (QualName qs name))
+               `catchError` (return . Left)
+          case r of
+            Left err | null qs -> throwError err
+                     | otherwise -> do
+                         (qn', t, fields) <- findRootVar (init qs) (last qs)
+                         return (qn', t, fields++[name])
+            Right (qn', t) -> return (qn', t, [])
+
+        checkField e k =
+          case typeOf e of
+            Record fs | Just t <- M.lookup k fs ->
+                        return $ Project k e (Info t) loc
+            _ -> bad $ InvalidField loc (typeOf e) (pretty k)
 
 checkExp (Negate arg loc) = do
   arg' <- require anyNumberType =<< checkExp arg
@@ -583,7 +648,7 @@ checkExp (Apply fname args _ loc) = do
   (_, rettype') <- checkFuncall (Just fname) loc (tparams, paramtypes, ftype) argflows
 
   return $ Apply fname'
-    (zip args' $ map diet paramtypes) (Info $ removeShapeAnnotations rettype') loc
+    (zip args' $ map (diet . snd) paramtypes) (Info $ removeShapeAnnotations rettype') loc
 
 checkExp (LetPat tparams pat e body pos) = do
   noTypeParamsPermitted tparams
@@ -599,8 +664,7 @@ checkExp (LetFun name (tparams, params, maybe_retdecl, NoInfo, e) body loc) =
   sequentially (checkFunDef' (name, maybe_retdecl, tparams, params, e, loc)) $
     \(name', tparams', params', maybe_retdecl', rettype, e') closure -> do
 
-    let patternType' = toStruct . vacuousShapeAnnotations . patternType
-        entry = BoundF (tparams', map patternType' params', rettype) closure
+    let entry = BoundF (tparams', map patternParam params', rettype) closure
         bindF scope = scope { scopeVtable = M.insert name' entry $ scopeVtable scope }
     body' <- local bindF $ checkExp body
 
@@ -671,23 +735,28 @@ checkExp (Reshape shapeexp arrexp loc) = do
     t -> bad $ TypeError loc $ "Shape argument " ++ pretty shapeexp ++
       " to reshape must be integer or tuple of integers, but is " ++ pretty t
 
+  case typeOf arrexp' of
+    Array{} -> return ()
+    t -> bad $ TypeError loc $
+         "Array argument to reshape must be an array, but has type " ++ pretty t
+
   return $ Reshape shapeexp' arrexp' loc
 
 checkExp (Rearrange perm arrexp pos) = do
   arrexp' <- checkExp arrexp
-  let rank = arrayRank $ typeOf arrexp'
-  when (length perm /= rank || sort perm /= [0..rank-1]) $
-    bad $ PermutationError pos perm rank
+  let r = arrayRank $ typeOf arrexp'
+  when (length perm /= r || sort perm /= [0..r-1]) $
+    bad $ PermutationError pos perm r
   return $ Rearrange perm arrexp' pos
 
 checkExp (Rotate d offexp arrexp loc) = do
   arrexp' <- checkExp arrexp
   offexp' <- require [Prim $ Signed Int32] =<< checkExp offexp
-  let rank = arrayRank (typeOf arrexp')
-  when (rank <= d) $
+  let r= arrayRank (typeOf arrexp')
+  when (r <= d) $
     bad $ TypeError loc $ "Attempting to rotate dimension " ++ show d ++
     " of array " ++ pretty arrexp ++
-    " which has only " ++ show rank ++ " dimensions."
+    " which has only " ++ show r ++ " dimensions."
   return $ Rotate d offexp' arrexp' loc
 
 checkExp (Zip i e es loc) = do
@@ -746,15 +815,16 @@ checkExp (Scan fun startexp arrexp pos) = do
     bad $ TypeError pos $ "Array element value is of type " ++ pretty inrowt ++ ", but scan function returns type " ++ pretty scantype ++ "."
   return $ Scan fun' startexp' arrexp' pos
 
-checkExp (Filter fun arrexp pos) = do
+checkExp (Filter fun arrexp loc) = do
   (arrexp', (rowelemt, argflow, argloc)) <- checkSOACArrayArg arrexp
   let nonunique_arg = (rowelemt `setUniqueness` Nonunique,
                        argflow, argloc)
   fun' <- checkLambda fun [nonunique_arg]
-  when (lambdaReturnType fun' /= Prim Bool) $
-    bad $ TypeError pos "Filter function does not return bool."
+  let lam_t = lambdaReturnType fun'
+  when (lam_t /= Prim Bool) $
+    bad $ TypeError loc $ "Filter function must return bool, but returns " ++ pretty lam_t ++ "."
 
-  return $ Filter fun' arrexp' pos
+  return $ Filter fun' arrexp' loc
 
 checkExp (Partition funs arrexp pos) = do
   (arrexp', (rowelemt, argflow, argloc)) <- checkSOACArrayArg arrexp
@@ -913,14 +983,14 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
         Wildcard (Info $ t `setUniqueness` Nonunique) wloc
       uniquePat (PatternParens p ploc) =
         PatternParens (uniquePat p) ploc
-      uniquePat (Id (Ident name (Info t) iloc))
+      uniquePat (Id name (Info t) iloc)
         | name `S.member` consumed_merge =
             let t' = t `setUniqueness` Unique `setAliases` mempty
-            in Id (Ident name (Info t') iloc)
+            in Id name (Info t') iloc
         | otherwise =
             let t' = case t of Record{} -> t
                                _        -> t `setUniqueness` Nonunique
-            in Id (Ident name (Info t') iloc)
+            in Id name (Info t') iloc
       uniquePat (TuplePattern pats ploc) =
         TuplePattern (map uniquePat pats) ploc
       uniquePat (RecordPattern fs ploc) =
@@ -942,21 +1012,21 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
   -- returned for a unique merge parameter does not alias anything
   -- else returned.
   bound_outside <- asks $ S.fromList . M.keys . scopeVtable
-  let checkMergeReturn (Id ident) t
-        | unique $ unInfo $ identType ident,
+  let checkMergeReturn (Id pat_v (Info pat_t) _) t
+        | unique pat_t,
           v:_ <- S.toList $ aliases t `S.intersection` bound_outside =
             lift $ bad $ TypeError loc $ "Loop return value corresponding to merge parameter " ++
-            pretty (identName ident) ++ " aliases " ++ pretty v ++ "."
+            pretty pat_v ++ " aliases " ++ pretty v ++ "."
         | otherwise = do
             (cons,obs) <- get
             unless (S.null $ aliases t `S.intersection` cons) $
               lift $ bad $ TypeError loc $ "Loop return value for merge parameter " ++
-              pretty (identName ident) ++ " aliases other consumed merge parameter."
-            when (unique (unInfo $ identType ident) &&
+              pretty pat_v ++ " aliases other consumed merge parameter."
+            when (unique pat_t &&
                   not (S.null (aliases t `S.intersection` (cons<>obs)))) $
               lift $ bad $ TypeError loc $ "Loop return value for consuming merge parameter " ++
-              pretty (identName ident) ++ " aliases previously returned value." ++ show (aliases t, cons, obs)
-            if unique (unInfo $ identType ident)
+              pretty pat_v ++ " aliases previously returned value." ++ show (aliases t, cons, obs)
+            if unique pat_t
               then put (cons<>aliases t, obs)
               else put (cons, obs<>aliases t)
       checkMergeReturn (TuplePattern pats _) t | Just ts <- isTupleRecord t =
@@ -965,10 +1035,14 @@ checkExp (DoLoop tparams mergepat mergeexp form loopbody loc) =
         return ()
   evalStateT (checkMergeReturn mergepat'' $ typeOf loopbody') (mempty, mempty)
 
-  let consumeMerge (Id (Ident _ (Info pt) ploc)) mt
+  let consumeMerge (Id _ (Info pt) ploc) mt
         | unique pt = consume ploc $ aliases mt
       consumeMerge (TuplePattern pats _) t | Just ts <- isTupleRecord t =
         zipWithM_ consumeMerge pats ts
+      consumeMerge (PatternParens pat _) t =
+        consumeMerge pat t
+      consumeMerge (PatternAscription pat _) t =
+        consumeMerge pat t
       consumeMerge _ _ =
         return ()
   consumeMerge mergepat'' $ typeOf mergeexp'
@@ -1015,19 +1089,21 @@ checkArg arg = do
 
 checkFuncall :: Maybe (QualName Name) -> SrcLoc
              -> FunBinding -> [Arg]
-             -> TermTypeM ([TypeBase (ShapeDecl VName) ()],
-                            TypeBase (ShapeDecl VName) (Names VName))
+             -> TermTypeM ([TypeBase (DimDecl VName) ()],
+                            TypeBase (DimDecl VName) (Names VName))
 checkFuncall fname loc funbind args = do
   (_, paramtypes, rettype) <-
     instantiatePolymorphicFunction fname loc funbind args
 
-  forM_ (zip (map diet paramtypes) args) $ \(d, (t, dflow, argloc)) -> do
+  let diets = map (diet . snd) paramtypes
+
+  forM_ (zip diets args) $ \(d, (t, dflow, argloc)) -> do
     maybeCheckOccurences dflow
     let occurs = consumeArg argloc t d
     occur $ dflow `seqOccurences` occurs
 
-  return (paramtypes,
-          returnType rettype (map diet paramtypes) (map argType args))
+  return (map snd paramtypes,
+          returnType rettype diets (map argType args))
 
 -- | Find concrete types for a call to a polymorphic function.
 instantiatePolymorphicFunction :: MonadTypeChecker m =>
@@ -1040,10 +1116,10 @@ instantiatePolymorphicFunction maybe_fname call_loc (tparams, pts, ret) args = d
     "expecting " ++ pretty (length pts) ++ " arguments, but got " ++
     pretty (length args) ++ " arguments."
 
-  substs <- foldM instantiateArg mempty $ zip (map toStructural pts) args
+  substs <- foldM instantiateArg mempty $ zip (map (toStructural . snd) pts) args
   let substs' = M.map (TypeSub . TypeAbbr [] . vacuousShapeAnnotations . fst) substs
   return ([],
-          map (substituteTypes substs') pts,
+          map (fmap $ substituteTypes substs') pts,
           substituteTypes substs' ret)
   where
     prefix = (("In call of function " ++ fname ++ ": ")++)
@@ -1066,13 +1142,26 @@ consumeArg loc at Consume = [consumption (aliases at) loc]
 consumeArg loc at _       = [observation (aliases at) loc]
 
 checkOneExp :: UncheckedExp -> TypeM Exp
-checkOneExp = runTermTypeM . checkExp
+checkOneExp = fmap fst . runTermTypeM . checkExp
+
+maybePermitRecursion :: VName -> [TypeParam] -> [Pattern] -> Maybe StructType
+                     -> TermTypeM a -> TermTypeM a
+maybePermitRecursion fname tparams params (Just rettype) m = do
+  permit <- liftTypeM recursionPermitted
+  if permit then
+    let patternType' = toStruct . vacuousShapeAnnotations . patternType
+        pts = zip (repeat Nothing) $ map patternType' params
+        entry = BoundF (tparams, pts, rettype) mempty
+        bindF scope = scope { scopeVtable = M.insert fname entry $ scopeVtable scope }
+    in local bindF m
+    else m
+maybePermitRecursion _ _ _ Nothing m = m
 
 checkFunDef :: (Name, Maybe UncheckedTypeExp,
                 [UncheckedTypeParam], [UncheckedPattern],
                 UncheckedExp, SrcLoc)
             -> TypeM (VName, [TypeParam], [Pattern], Maybe (TypeExp VName), StructType, Exp)
-checkFunDef = runTermTypeM . checkFunDef'
+checkFunDef = fmap fst . runTermTypeM . checkFunDef'
 
 checkFunDef' :: (Name, Maybe UncheckedTypeExp,
                  [UncheckedTypeParam], [UncheckedPattern],
@@ -1088,17 +1177,10 @@ checkFunDef' (fname, maybe_retdecl, tparams, params, body, loc) = do
     bad $ TypeError loc "The || operator may not be redefined."
 
   bindingPatternGroup tparams (zip params $ repeat NoneInferred) $ \tparams' params' -> do
-    maybe_retdecl' <-
-      case maybe_retdecl of
-        Just rettype -> do
-          (rettype', rettype_st, ret_implicit) <- checkTypeExp rettype
-          if M.null $ implicitNameMap ret_implicit
-            then return $ Just (rettype', rettype_st)
-            else throwError $ TypeError loc
-                 "Fresh sizes may not be bound in return type."
-        Nothing -> return Nothing
+    maybe_retdecl' <- traverse checkTypeExp maybe_retdecl
 
-    body' <- checkFunBody fname body (snd <$> maybe_retdecl') loc
+    body' <- maybePermitRecursion fname' tparams' params' (snd <$> maybe_retdecl') $
+             checkFunBody fname body (snd <$> maybe_retdecl') loc
     (maybe_retdecl'', rettype) <- case maybe_retdecl' of
       Just (retdecl', retdecl_type) -> do
         let rettype_structural = toStructural retdecl_type
@@ -1163,21 +1245,22 @@ checkLambda (AnonymFun tparams params body maybe_ret NoInfo loc) args
       let params_with_ts = zip params $ map (Inferred . fromStruct . argType) args
       (maybe_ret', tparams', params', body') <-
         noUnique $ bindingPatternGroup tparams params_with_ts $ \tparams' params' -> do
-        maybe_ret' <- maybe (pure Nothing) (fmap Just . checkTypeDecl loc) maybe_ret
+        maybe_ret' <- traverse checkTypeDecl maybe_ret
         body' <- checkFunBody (nameFromString "<anonymous>") body
                  (unInfo . expandedType <$> maybe_ret') loc
         return (maybe_ret', tparams', params', body')
       let ret' = case maybe_ret' of
                    Nothing -> toStruct $ vacuousShapeAnnotations $ typeOf body'
                    Just (TypeDecl _ (Info ret)) -> ret
-      (_, ret'') <- checkFuncall Nothing loc ([], map patternStructType params', ret') args
+          lamt = ([], zip (repeat Nothing) $ map patternStructType params', ret')
+      (_, ret'') <- checkFuncall Nothing loc lamt args
       return $ AnonymFun tparams' params' body' maybe_ret' (Info $ toStruct ret'') loc
   | otherwise = bad $ TypeError loc $ "Anonymous function defined with " ++ show (length params) ++ " parameters, but expected to take " ++ show (length args) ++ " arguments."
 
 checkLambda (CurryFun fname curryargexps _ loc) args = do
   (curryargexps', curryargs) <- unzip <$> mapM checkArg curryargexps
   (fname', (tparams, paramtypes, rt), closure) <- lookupFunction fname (map argType $ curryargs++args) loc
-  case find (unique . snd) $ zip curryargexps paramtypes of
+  case find (unique . snd) $ zip curryargexps $ map snd paramtypes of
     Just (e, _) -> bad $ CurriedConsumption fname $ srclocOf e
     _           -> return ()
 
@@ -1191,7 +1274,7 @@ checkLambda (CurryFun fname curryargexps _ loc) args = do
 
 checkLambda (BinOpFun op NoInfo NoInfo NoInfo loc) [x_arg,y_arg] = do
   (op', (tparams, paramtypes, rt), closure) <- lookupFunction op (map argType [x_arg,y_arg]) loc
-  let paramtypes' = map (fromStruct . removeShapeAnnotations) paramtypes
+  let paramtypes' = map (fromStruct . removeShapeAnnotations . snd) paramtypes
 
   occur closure
   (_, rettype') <-
@@ -1224,6 +1307,18 @@ checkLambda (CurryBinOpRight binop x _ _ loc) [arg] = do
 
 checkLambda (CurryBinOpRight binop _ _ _ loc) args =
   bad $ ParameterMismatch (Just binop) loc (Left 1) $
+  map (toStructural . argType) args
+
+checkLambda (CurryProject k _ loc) [(argt, dflow, argloc)] = do
+  maybeCheckOccurences dflow
+  occur dflow
+  case argt of
+    Record fs | Just t <- M.lookup k fs ->
+                  return $ CurryProject k (Info argt, Info t) loc
+    _ -> bad $ InvalidField argloc argt (pretty k)
+
+checkLambda (CurryProject _ _ loc) args =
+  bad $ ParameterMismatch Nothing loc (Left 1) $
   map (toStructural . argType) args
 
 checkCurryBinOp :: ((Arg,Arg) -> (Arg,Arg))

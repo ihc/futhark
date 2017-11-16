@@ -29,13 +29,13 @@ usageInStm (Let pat lore e) =
           <> mconcat (map consumptionInPatElem $ patternElements pat)
         usageInExpLore =
           UT.usages $ freeIn lore
-        consumptionInPatElem (PatElem _ (BindInPlace _ src _) _) =
+        consumptionInPatElem (PatElem _ (BindInPlace src _) _) =
           UT.consumedUsage src
         consumptionInPatElem _ =
           mempty
 
 usageInExp :: (Aliased lore, UsageInOp (Op lore)) => Exp lore -> UT.UsageTable
-usageInExp (Apply _ args _) =
+usageInExp (Apply _ args _ _) =
   mconcat [ mconcat $ map UT.consumedUsage $
             S.toList $ subExpAliases arg
           | (arg,d) <- args, d == Consume ]

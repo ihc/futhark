@@ -56,7 +56,7 @@ analyseStms = analyseStms' []
           m $ reverse acc
         analyseStms' acc (bnd:bnds) m = do
           bnd' <- analyseStm bnd
-          bindPattern (bindingPattern bnd') $
+          bindPattern (stmPattern bnd') $
             analyseStms' (bnd':acc) bnds m
 
 analyseStm :: (Attributes lore, CanBeRanged (Op lore)) =>
@@ -76,6 +76,7 @@ analyseExp = mapExpM analyse
                     , mapOnVName = return
                     , mapOnBody = const analyseBody
                     , mapOnRetType = return
+                    , mapOnBranchType = return
                     , mapOnFParam = return
                     , mapOnLParam = return
                     , mapOnOp = return . addOpRanges

@@ -76,12 +76,15 @@ instance Substitute attr => Substitute (PatElemT attr) where
     (substituteNames substs bindage)
     (substituteNames substs attr)
 
+instance Substitute attr => Substitute (StmAux attr) where
+  substituteNames substs (StmAux cs attr) =
+    StmAux (substituteNames substs cs) (substituteNames substs attr)
+
 instance Substitute Bindage where
   substituteNames _ BindVar =
     BindVar
-  substituteNames substs (BindInPlace cs src is) =
+  substituteNames substs (BindInPlace src is) =
     BindInPlace
-    (map (substituteNames substs) cs)
     (substituteNames substs src)
     (map (substituteNames substs) is)
 
@@ -94,6 +97,10 @@ instance Substitute attr => Substitute (ParamT attr) where
 instance Substitute attr => Substitute (PatternT attr) where
   substituteNames substs (Pattern context values) =
     Pattern (substituteNames substs context) (substituteNames substs values)
+
+instance Substitute Certificates where
+  substituteNames substs (Certificates cs) =
+    Certificates $ substituteNames substs cs
 
 instance Substitutable lore => Substitute (Stm lore) where
   substituteNames substs (Let pat annot e) =
@@ -108,22 +115,15 @@ instance Substitutable lore => Substitute (Body lore) where
     (substituteNames substs attr)
     (substituteNames substs bnds)
     (substituteNames substs res)
-{-
-instance Substitutable lore => Substitute (FunDef lore) where
-  substituteNames substs (FunDef entry name ret ps body) =
-    FunDef entry
-      (substituteNames substs name)
-      (substituteNames substs ret)
-      (substituteNames substs ps)
-      (substituteNames substs body)
--}
-replace :: (Substitutable lore) => M.Map VName VName -> Mapper lore lore Identity
+
+replace :: Substitutable lore => M.Map VName VName -> Mapper lore lore Identity
 replace substs = Mapper {
                    mapOnVName = return . substituteNames substs
                  , mapOnSubExp = return . substituteNames substs
                  , mapOnBody = const $ return . substituteNames substs
-                 , mapOnCertificates = return . map (substituteNames substs)
+                 , mapOnCertificates = return . substituteNames substs
                  , mapOnRetType = return . substituteNames substs
+                 , mapOnBranchType = return . substituteNames substs
                  , mapOnFParam = return . substituteNames substs
                  , mapOnLParam = return . substituteNames substs
                  , mapOnOp = return . substituteNames substs
@@ -135,17 +135,13 @@ instance Substitute Rank where
 instance Substitute () where
   substituteNames _ = id
 
-instance Substitute Shape where
+instance Substitute d => Substitute (ShapeBase d) where
   substituteNames substs (Shape es) =
     Shape $ map (substituteNames substs) es
 
-instance Substitute ExtShape where
-  substituteNames substs (ExtShape es) =
-    ExtShape $ map (substituteNames substs) es
-
-instance Substitute ExtDimSize where
-  substituteNames substs (Free se) = Free $ substituteNames substs se
-  substituteNames _      (Ext x)   = Ext x
+instance Substitute d => Substitute (Ext d) where
+  substituteNames substs (Free x) = Free $ substituteNames substs x
+  substituteNames _      (Ext x)  = Ext x
 
 instance Substitute Names where
   substituteNames = S.map . substituteNames
@@ -177,10 +173,6 @@ instance Substitute Ident where
       , identType = substituteNames substs $ identType v
       }
 
-instance Substitute ExtRetType where
-  substituteNames substs (ExtRetType ts) =
-    ExtRetType $ map (substituteNames substs) ts
-
 instance Substitute d => Substitute (DimChange d) where
   substituteNames substs = fmap $ substituteNames substs
 
@@ -209,4 +201,5 @@ type Substitutable lore = (Annotations lore,
                            Substitute (FParamAttr lore),
                            Substitute (LParamAttr lore),
                            Substitute (RetType lore),
+                           Substitute (BranchType lore),
                            Substitute (Op lore))

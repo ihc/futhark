@@ -60,11 +60,11 @@ simplifyKernelOp :: (Engine.SimplifiableLore lore,
                      BodyAttr outerlore ~ (), BodyAttr lore ~ (),
                      ExpAttr lore ~ ExpAttr outerlore,
                      SameScope lore outerlore,
-                     RetType lore ~ RetType outerlore) =>
+                     RetType lore ~ RetType outerlore,
+                     BranchType lore ~ BranchType outerlore) =>
                     Engine.SimpleOps lore -> Engine.Env (Engine.SimpleM lore)
                  -> Kernel lore -> Engine.SimpleM outerlore (Kernel (Wise lore))
-simplifyKernelOp ops env (Kernel desc cs space ts kbody) = do
-  cs' <- Engine.simplify cs
+simplifyKernelOp ops env (Kernel desc space ts kbody) = do
   space' <- Engine.simplify space
   ts' <- mapM Engine.simplify ts
   outer_vtable <- Engine.getVtable
@@ -79,7 +79,7 @@ simplifyKernelOp ops env (Kernel desc cs space ts kbody) = do
         simplifyKernelBody kbody
   when again Engine.changed
   mapM_ processHoistedStm kbody_hoisted
-  return $ Kernel desc cs' space' ts' $ mkWiseKernelBody () kbody_bnds' kbody_res'
+  return $ Kernel desc space' ts' $ mkWiseKernelBody () kbody_bnds' kbody_res'
   where scope_vtable = ST.fromScope scope
         scope = scopeOfKernelSpace space
         bound_here = S.fromList $ M.keys scope
@@ -91,7 +91,9 @@ simplifyKernelOp _ _ (SufficientParallelism se) =
   SufficientParallelism <$> Engine.simplify se
 
 processHoistedStm :: (PrettyLore from, MonadBinder m, ExpAttr from ~ ExpAttr (Lore m),
-                      BodyAttr from ~ BodyAttr (Lore m), RetType from ~ RetType (Lore m),
+                      BodyAttr from ~ BodyAttr (Lore m),
+                      RetType from ~ RetType (Lore m),
+                      BranchType from ~ BranchType (Lore m),
                       LetAttr from ~ LetAttr (Lore m),
                       FParamAttr from ~ FParamAttr (Lore m),
                       LParamAttr from ~ LParamAttr (Lore m)) =>
@@ -218,11 +220,11 @@ instance Engine.Simplifiable SpaceStructure where
 instance Engine.Simplifiable KernelResult where
   simplify (ThreadsReturn threads what) =
     ThreadsReturn <$> Engine.simplify threads <*> Engine.simplify what
-  simplify (WriteReturn w a i v) =
+  simplify (WriteReturn ws a is v) =
     WriteReturn <$>
-    Engine.simplify w <*>
+    mapM Engine.simplify ws <*>
     Engine.simplify a <*>
-    Engine.simplify i <*>
+    mapM Engine.simplify is <*>
     Engine.simplify v
   simplify (ConcatReturns o w pte moffset what) =
     ConcatReturns
@@ -254,14 +256,14 @@ fuseStreamIota :: (LocalScope (Lore m) m,
                   MonadBinder m, Lore m ~ Wise InKernel) =>
                  TopDownRule m
 fuseStreamIota vtable (Let pat _ (Op (GroupStream w max_chunk lam accs arrs)))
-  | ([(iota_param, iota_start, iota_stride, iota_t)], params_and_arrs) <-
+  | ([(iota_cs, iota_param, iota_start, iota_stride, iota_t)], params_and_arrs) <-
       partitionEithers $ zipWith (isIota vtable) (groupStreamArrParams lam) arrs = do
 
       let (arr_params', arrs') = unzip params_and_arrs
           chunk_size = groupStreamChunkSize lam
           offset = groupStreamChunkOffset lam
 
-      body' <- insertStmsM $ inScopeOf lam $ do
+      body' <- insertStmsM $ inScopeOf lam $ certifying iota_cs $ do
         -- Convert index to appropriate type.
         offset' <- asIntS iota_t $ Var offset
         offset'' <- letSubExp "offset_by_stride" $
@@ -277,10 +279,11 @@ fuseStreamIota vtable (Let pat _ (Op (GroupStream w max_chunk lam accs arrs)))
       letBind_ pat $ Op $ GroupStream w max_chunk lam' accs arrs'
 fuseStreamIota _ _ = cannotSimplify
 
-isIota :: ST.SymbolTable lore -> a -> VName -> Either (a, SubExp, SubExp, IntType) (a, VName)
+isIota :: ST.SymbolTable lore -> a -> VName
+       -> Either (Certificates, a, SubExp, SubExp, IntType) (a, VName)
 isIota vtable chunk arr
-  | Just (BasicOp (Iota _ x s it)) <- ST.lookupExp arr vtable =
-      Left (chunk, x, s, it)
+  | Just (BasicOp (Iota _ x s it), cs) <- ST.lookupExp arr vtable =
+      Left (cs, chunk, x, s, it)
   | otherwise =
       Right (chunk, arr)
 
@@ -292,7 +295,7 @@ removeInvariantKernelResults :: (LocalScope (Lore m) m,
                                 TopDownRule m
 
 removeInvariantKernelResults vtable (Let (Pattern [] kpes) attr
-                                      (Op (Kernel desc cs space ts (KernelBody _ kstms kres)))) = do
+                                      (Op (Kernel desc space ts (KernelBody _ kstms kres)))) = do
   (ts', kpes', kres') <-
     unzip3 <$> filterM checkForInvarianceResult (zip3 ts kpes kres)
 
@@ -300,7 +303,7 @@ removeInvariantKernelResults vtable (Let (Pattern [] kpes) attr
   when (kres == kres')
     cannotSimplify
 
-  addStm $ Let (Pattern [] kpes') attr $ Op $ Kernel desc cs space ts' $
+  addStm $ Let (Pattern [] kpes') attr $ Op $ Kernel desc space ts' $
     mkWiseKernelBody () kstms kres'
   where isInvariant Constant{} = True
         isInvariant (Var v) = isJust $ ST.lookup v vtable
@@ -332,7 +335,7 @@ distributeKernelResults :: (LocalScope (Lore m) m, MonadBinder m,
                            BottomUpRule m
 distributeKernelResults (vtable, used)
   (Let (Pattern [] kpes) attr
-    (Op (Kernel desc kcs kspace kts (KernelBody _ kstms kres)))) = do
+    (Op (Kernel desc kspace kts (KernelBody _ kstms kres)))) = do
   -- Iterate through the bindings.  For each, we check whether it is
   -- in kres and can be moved outside.  If so, we remove it from kres
   -- and kpes and make it a binding outside.
@@ -343,24 +346,24 @@ distributeKernelResults (vtable, used)
     cannotSimplify
 
   addStm $ Let (Pattern [] kpes') attr $
-    Op $ Kernel desc kcs kspace kts' $ mkWiseKernelBody () (reverse kstms_rev) kres'
+    Op $ Kernel desc kspace kts' $ mkWiseKernelBody () (reverse kstms_rev) kres'
   where
     free_in_kstms = mconcat $ map freeInStm kstms
 
     distribute (kpes', kts', kres', kstms_rev) bnd
-      | Let (Pattern [] [pe]) _ (BasicOp (Index cs arr slice)) <- bnd,
+      | Let (Pattern [] [pe]) _ (BasicOp (Index arr slice)) <- bnd,
         kspace_slice <- map (DimFix . Var . fst) $ spaceDimensions kspace,
         kspace_slice `isPrefixOf` slice,
         remaining_slice <- drop (length kspace_slice) slice,
         all (isJust . flip ST.lookup vtable) $ S.toList $
-          freeIn cs <> freeIn arr <> freeIn remaining_slice,
+          freeIn arr <> freeIn remaining_slice,
         Just (kpe, kpes'', kts'', kres'') <- isResult kpes' kts' kres' pe = do
           let outer_slice = map (\(_, d) -> DimSlice
                                             (constant (0::Int32))
                                             d
                                             (constant (1::Int32))) $
                             spaceDimensions kspace
-              index kpe' = letBind_ (Pattern [] [kpe']) $ BasicOp $ Index (kcs<>cs) arr $
+              index kpe' = letBind_ (Pattern [] [kpe']) $ BasicOp $ Index arr $
                            outer_slice <> remaining_slice
           if patElemName kpe `UT.isConsumed` used
             then do precopy <- newVName $ baseString (patElemName kpe) <> "_precopy"
@@ -402,7 +405,7 @@ simplifyKnownIterationStream _ (Let pat _
         letBindNames'_ [paramName p] $ BasicOp $ SubExp a
 
       forM_ (zip arr_params arrs) $ \(p,a) ->
-        letBindNames'_ [paramName p] $ BasicOp $ Index [] a $
+        letBindNames'_ [paramName p] $ BasicOp $ Index a $
         fullSlice (paramType p)
         [DimSlice (Var chunk_offset) (Var chunk_size) (constant (1::Int32))]
 

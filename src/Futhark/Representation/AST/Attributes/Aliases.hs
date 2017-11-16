@@ -50,7 +50,7 @@ primOpAliases ConvOp{} = [mempty]
 primOpAliases CmpOp{} = [mempty]
 primOpAliases UnOp{} = [mempty]
 
-primOpAliases (Index _ ident _) =
+primOpAliases (Index ident _) =
   [vnameAliases ident]
 primOpAliases Iota{} =
   [mempty]
@@ -60,13 +60,13 @@ primOpAliases (Repeat _ _ v) =
   [vnameAliases v]
 primOpAliases Scratch{} =
   [mempty]
-primOpAliases (Reshape _ _ e) =
+primOpAliases (Reshape _ e) =
   [vnameAliases e]
-primOpAliases (Rearrange _ _ e) =
+primOpAliases (Rearrange _ e) =
   [vnameAliases e]
-primOpAliases (Rotate _ _ e) =
+primOpAliases (Rotate _ e) =
   [vnameAliases e]
-primOpAliases (Split _ _ sizeexps e) =
+primOpAliases (Split _ sizeexps e) =
   replicate (length sizeexps) (vnameAliases e)
 primOpAliases Concat{} =
   [mempty]
@@ -76,7 +76,7 @@ primOpAliases Manifest{} =
   [mempty]
 primOpAliases Assert{} =
   [mempty]
-primOpAliases (Partition _ n _ arr) =
+primOpAliases (Partition n _ arr) =
   replicate n mempty ++ map vnameAliases arr
 
 ifAliases :: ([Names], Names) -> ([Names], Names) -> [Names]
@@ -90,10 +90,12 @@ funcallAliases args t =
   returnAliases t [(subExpAliases se, d) | (se,d) <- args ]
 
 expAliases :: (Aliased lore) => Exp lore -> [Names]
-expAliases (If _ tb fb _) =
-  ifAliases
-  (bodyAliases tb, consumedInBody tb)
-  (bodyAliases fb, consumedInBody fb)
+expAliases (If _ tb fb attr) =
+  drop (length all_aliases - length ts) all_aliases
+  where ts = ifReturns attr
+        all_aliases = ifAliases
+                      (bodyAliases tb, consumedInBody tb)
+                      (bodyAliases fb, consumedInBody fb)
 expAliases (BasicOp op) = primOpAliases op
 expAliases (DoLoop ctxmerge valmerge _ loopbody) =
   map (`S.difference` merge_names) val_aliases
@@ -101,7 +103,7 @@ expAliases (DoLoop ctxmerge valmerge _ loopbody) =
           splitAt (length ctxmerge) $ bodyAliases loopbody
         merge_names = S.fromList $
                       map (paramName . fst) $ ctxmerge ++ valmerge
-expAliases (Apply _ args t) =
+expAliases (Apply _ args t _) =
   funcallAliases args $ retTypeValues t
 expAliases (Op op) = opAliases op
 
@@ -121,11 +123,11 @@ maskAliases _   Consume = mempty
 maskAliases als Observe = als
 
 consumedInStm :: Aliased lore => Stm lore -> Names
-consumedInStm binding = consumedInPattern (bindingPattern binding) <>
-                            consumedInExp (bindingExp binding)
+consumedInStm binding = consumedInPattern (stmPattern binding) <>
+                            consumedInExp (stmExp binding)
 
 consumedInExp :: (Aliased lore) => Exp lore -> Names
-consumedInExp (Apply _ args _) =
+consumedInExp (Apply _ args _ _) =
   mconcat (map (consumeArg . first subExpAliases) args)
   where consumeArg (als, Consume) = als
         consumeArg (_,   Observe) = mempty
@@ -151,7 +153,7 @@ consumedInPattern pat =
   mconcat (map (consumedInBindage . patElemBindage) $
            patternContextElements pat ++ patternValueElements pat)
   where consumedInBindage BindVar = mempty
-        consumedInBindage (BindInPlace _ src _) = vnameAliases src
+        consumedInBindage (BindInPlace src _) = vnameAliases src
 
 -- | Something that contains alias information.
 class AliasesOf a where

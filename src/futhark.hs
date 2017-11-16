@@ -18,6 +18,7 @@ import Prelude hiding (id)
 import Futhark.Pass
 import Futhark.Actions
 import Futhark.Compiler
+import Language.Futhark.Futlib.Prelude
 import Language.Futhark.Parser (parseFuthark)
 import Futhark.Util.Options
 import Futhark.Pipeline
@@ -245,10 +246,6 @@ commandLineOptions =
         opts { futharkPipeline = PrettyPrint })
     "Parse and pretty-print the AST of the given program."
 
-  , Option [] ["compile-sequential"]
-    (NoArg $ Right $ \opts ->
-       opts { futharkAction = ExplicitMemoryAction seqCodeGenAction })
-    "Translate program into sequential C and write it on standard output."
   , Option [] ["compile-imperative"]
     (NoArg $ Right $ \opts ->
        opts { futharkAction = ExplicitMemoryAction impCodeGenAction })
@@ -267,6 +264,12 @@ commandLineOptions =
   , Option "p" ["print"]
     (NoArg $ Right $ \opts -> opts { futharkAction = PolyAction printAction printAction printAction })
     "Prettyprint the resulting internal representation on standard output (default action)."
+  , Option "I" ["include"]
+    (ReqArg (\path -> Right $ changeFutharkConfig $ \opts ->
+                opts { futharkImportPaths =
+                         futharkImportPaths opts `mappend` importPath path })
+    "DIR")
+    "Add directory to search path."
   , typedPassOption soacsProg Kernels firstOrderTransform "f"
   , soacsPassOption fuseSOACs "o"
   , soacsPassOption inlineAndRemoveDeadFunctions []
@@ -311,7 +314,7 @@ main = mainWithOptions newConfig commandLineOptions compile
           case futharkPipeline config of
             TypeCheck -> do
               -- No pipeline; just read the program and type check
-              (_, warnings, _, _) <- readProgram file
+              (_, warnings, _, _) <- readProgram False preludeBasis mempty file
               liftIO $ hPutStr stderr $ show warnings
             PrettyPrint -> liftIO $ do
               maybe_prog <- parseFuthark file <$> T.readFile file
@@ -319,7 +322,7 @@ main = mainWithOptions newConfig commandLineOptions compile
                 Left err  -> fail $ show err
                 Right prog-> putStrLn $ pretty prog
             Pipeline{} -> do
-              prog <- runPipelineOnProgram (futharkConfig config) id file
+              prog <- runPipelineOnProgram (futharkConfig config) preludeBasis id file
               runPolyPasses config prog
 
 runPolyPasses :: Config -> SOACS.Prog -> FutharkM ()

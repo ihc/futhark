@@ -45,7 +45,8 @@ internaliseMapLambda internaliseLambda lam args = do
   shapefun <- makeShapeFun params shape_body (length inner_shapes)
   bindMapShapes inner_shapes shapefun args outer_shape
   body' <- bindingParamTypes params $
-           ensureResultShape asserting (srclocOf lam) rettype' body
+           ensureResultShape asserting "not all iterations produce same shape"
+           (srclocOf lam) rettype' body
   return $ I.Lambda params body' rettype'
 
 makeShapeFun :: [I.LParam] -> I.Body -> Int
@@ -68,7 +69,7 @@ bindMapShapes inner_shapes sizefun args outer_shape
       let size_args = replicate (length $ lambdaParams sizefun) Nothing
       sizefun' <- deadCodeElimLambda <$> simplifyLambda sizefun Nothing size_args
       let sizefun_safe =
-            all (I.safeExp . I.bindingExp) $ I.bodyStms $ I.lambdaBody sizefun'
+            all (I.safeExp . I.stmExp) $ I.bodyStms $ I.lambdaBody sizefun'
           sizefun_arg_invariant =
             not $ any (`S.member` freeInBody (I.lambdaBody sizefun')) $
             map I.paramName $ lambdaParams sizefun'
@@ -77,21 +78,21 @@ bindMapShapes inner_shapes sizefun args outer_shape
                 forM_ (zip inner_shapes ses) $ \(v, se) ->
                   letBind_ (basicPattern' [] [v]) $ I.BasicOp $ I.SubExp se
         else letBind_ (basicPattern' [] inner_shapes) =<<
-             eIf isempty emptybranch nonemptybranch
+             eIf' isnonempty nonemptybranch emptybranch IfFallback
 
   where emptybranch =
           pure $ resultBody (map (const zero) $ I.lambdaReturnType sizefun)
         nonemptybranch = insertStmsM $
           resultBody <$> (eLambda sizefun =<< mapM index0 args)
 
-        isempty = eCmpOp (I.CmpEq I.int32)
-                  (pure $ I.BasicOp $ I.SubExp outer_shape)
-                  (pure $ I.BasicOp $ SubExp zero)
+        isnonempty = eNot $ eCmpOp (I.CmpEq I.int32)
+                     (pure $ I.BasicOp $ I.SubExp outer_shape)
+                     (pure $ I.BasicOp $ SubExp zero)
         zero = constant (0::I.Int32)
         index0 arg = do
           arg' <- letExp "arg" $ I.BasicOp $ I.SubExp arg
           arg_t <- lookupType arg'
-          letSubExp "elem" $ I.BasicOp $ I.Index [] arg' $ fullSlice arg_t [I.DimFix zero]
+          letSubExp "elem" $ I.BasicOp $ I.Index arg' $ fullSlice arg_t [I.DimFix zero]
 
 internaliseFoldLambda :: InternaliseLambda
                       -> E.Lambda
@@ -106,7 +107,8 @@ internaliseFoldLambda internaliseLambda lam acctypes arrtypes = do
   -- initial accumulator.  We accomplish this with an assertion and
   -- reshape().
   body' <- bindingParamTypes params $
-           ensureResultShape asserting (srclocOf lam) rettype' body
+           ensureResultShape asserting
+           "shape of result does not match shape of initial value" (srclocOf lam) rettype' body
   return $ I.Lambda params body' rettype'
 
 
@@ -138,7 +140,7 @@ internaliseRedomapInnerLambda internaliseLambda lam nes arr_args = do
                         ) (zip acc_params nes)
 
       map_bindings= acc_bindings ++ bodyStms body
-      map_lore    = bodyLore body
+      map_lore    = bodyAttr body
       map_body = I.Body map_lore map_bindings map_bodyres
   shape_body <- bindingParamTypes params $
                 shapeBody (map I.identName inner_shapes) rettypearr' map_body
@@ -154,7 +156,8 @@ internaliseRedomapInnerLambda internaliseLambda lam nes arr_args = do
   --
   -- finally, place assertions and return result
   body' <- bindingParamTypes params $
-           ensureResultShape asserting (srclocOf lam) (acctype'++rettypearr') body
+           ensureResultShape asserting "shape of result does not match shape of initial value"
+           (srclocOf lam) (acctype'++rettypearr') body
   return $ I.Lambda params body' (acctype'++rettypearr')
 
 internaliseStreamLambda :: InternaliseLambda
@@ -167,43 +170,7 @@ internaliseStreamLambda internaliseLambda lam rowts = do
       chunktypes = map (`arrayOfRow` I.Var chunk_size) rowts
   (params, body, rettype) <- localScope (scopeOfLParams [chunk_param]) $
                              internaliseLambda lam chunktypes
-
-
-  -- The accumulator result of the body must have the exact same
-  -- shape as the initial accumulator.  We accomplish this with
-  -- an assertion and reshape().  For the result arrays, we allow
-  -- the outermost dimension to be existential, but we require
-  -- all inner dimensions to be specified by the user, so we can
-  -- check them with an assertion and reshape().
-  --
-  let assertProperShape t se =
-        let name = "result_stream_proper_shape"
-        in  ensureShape asserting (srclocOf lam) t name se
-
-  body' <- insertStmsM $ do
-                let mkArrType :: (VName, ExtType) -> InternaliseM I.Type
-                    mkArrType (x, I.Array btp shp u) = do
-                      dsx <- I.shapeDims . I.arrayShape <$> I.lookupType x
-                      let dsrtpx =  I.extShapeDims shp
-                          resdims= zipWith (\ dx drtpx ->
-                                                  case drtpx of
-                                                    Ext  _ -> dx
-                                                    Free s -> s
-                                           ) dsx dsrtpx
-                      return $ I.Array btp (I.Shape resdims) u
-                    mkArrType (_, I.Prim btp ) =
-                      return $ I.Prim btp
-                    mkArrType (_, I.Mem se sid) =
-                      return $ I.Mem se sid
-                lamres <- bodyBind body
-                let lamarr_idtps = concatMap (\(y,tp) -> case y of
-                                                           I.Var ii -> [(ii,tp)]
-                                                           _        -> []
-                                             ) (zip lamres rettype)
-                arrtype' <- mapM mkArrType lamarr_idtps
-                reses <- zipWithM assertProperShape arrtype' lamres
-                return $ resultBody reses
-  return $ I.ExtLambda (chunk_param:params) body' rettype
+  return $ I.ExtLambda (chunk_param:params) body rettype
 
 -- Given @k@ lambdas, this will return a lambda that returns an
 -- (k+2)-element tuple of integers.  The first element is the
@@ -247,8 +214,8 @@ internalisePartitionLambdas internaliseLambda lams args = do
                     | (top,fromp) <- zip lam_params params ]
                   branchbnd = mkLet' [] intres $ I.If boolres
                               (result i)
-                              next_lam_body
-                              rettype
+                              next_lam_body $
+                              ifCommon rettype
               return $ mkBody (parambnds++bodybnds++[branchbnd]) $
                 map (I.Var . I.identName) intres
             _ ->

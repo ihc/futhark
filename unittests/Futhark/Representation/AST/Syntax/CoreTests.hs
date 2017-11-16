@@ -16,7 +16,7 @@ import Prelude
 import Language.Futhark.CoreTests ()
 import Futhark.Representation.PrimitiveTests()
 import Futhark.Representation.AST.Syntax.Core
-import Futhark.Representation.AST.Pretty
+import Futhark.Representation.AST.Pretty ()
 
 tests :: [Test]
 tests = subShapeTests
@@ -30,10 +30,10 @@ subShapeTests =
   , shape [Ext 1, Ext 2] `isNotSubShapeOf` shape [Ext 1, Ext 1]
   , shape [Ext 1, Ext 1] `isSubShapeOf` shape [Ext 1, Ext 2]
   ]
-  where shape :: [ExtDimSize] -> ExtShape
-        shape = ExtShape
+  where shape :: [ExtSize] -> ExtShape
+        shape = Shape
 
-        free :: Int -> ExtDimSize
+        free :: Int -> ExtSize
         free = Free . Constant . IntValue . Int32Value . fromIntegral
 
         isSubShapeOf shape1 shape2 =
@@ -67,5 +67,5 @@ instance Arbitrary Rank where
   arbitrary = Rank <$> elements [1..9]
 
 instance Arbitrary Shape where
-  arbitrary = Shape <$> map intconst <$> listOf1 (elements [1..9])
+  arbitrary = Shape . map intconst <$> listOf1 (elements [1..9])
     where intconst = Constant . IntValue . Int32Value

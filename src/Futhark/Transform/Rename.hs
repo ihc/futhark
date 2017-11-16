@@ -77,8 +77,8 @@ renameExp = modifyNameSource . runRenamer . rename
 renameStm :: (Renameable lore, MonadFreshNames m) =>
              Stm lore -> m (Stm lore)
 renameStm binding = do
-  e <- renameExp $ bindingExp binding
-  return binding { bindingExp = e }
+  e <- renameExp $ stmExp binding
+  return binding { stmExp = e }
 
 -- | Rename bound variables such that each is unique.  The semantics
 -- of the body is unaffected, under the assumption that the body was
@@ -202,20 +202,24 @@ instance Rename attr => Rename (PatElemT attr) where
   rename (PatElem ident bindage attr) =
     PatElem <$> rename ident <*> rename bindage <*> rename attr
 
+instance Rename Certificates where
+  rename (Certificates cs) = Certificates <$> rename cs
+
+instance Rename attr => Rename (StmAux attr) where
+  rename (StmAux cs attr) =
+    StmAux <$> rename cs <*> rename attr
+
 instance Rename Bindage where
   rename BindVar =
     return BindVar
-  rename (BindInPlace cs src is) =
-    BindInPlace <$>
-    mapM rename cs <*>
-    rename src <*>
-    mapM rename is
+  rename (BindInPlace src is) =
+    BindInPlace <$> rename src <*> mapM rename is
 
 instance Renameable lore => Rename (Body lore) where
   rename (Body lore [] res) =
     Body <$> rename lore <*> pure [] <*> rename res
   rename (Body blore (bnd:bnds) res) =
-    bind (patternNames $ bindingPattern bnd) $ do
+    bind (patternNames $ stmPattern bnd) $ do
       bnd' <- rename bnd
       Body blore' bnds' res' <- rename $ Body blore bnds res
       return $ Body blore' (bnd':bnds') res'
@@ -260,8 +264,9 @@ instance Renameable lore => Rename (Exp lore) where
                       mapOnBody = const rename
                     , mapOnSubExp = rename
                     , mapOnVName = rename
-                    , mapOnCertificates = mapM rename
+                    , mapOnCertificates = rename
                     , mapOnRetType = rename
+                    , mapOnBranchType = rename
                     , mapOnFParam = rename
                     , mapOnLParam = rename
                     , mapOnOp = rename
@@ -297,21 +302,15 @@ instance Rename Names where
 instance Rename Rank where
   rename = return
 
-instance Rename Shape where
+instance Rename d => Rename (ShapeBase d) where
   rename (Shape l) = Shape <$> mapM rename l
 
-instance Rename ExtShape where
-  rename (ExtShape l) = ExtShape <$> mapM rename l
-
-instance Rename ExtDimSize where
+instance Rename ExtSize where
   rename (Free se) = Free <$> rename se
   rename (Ext x)   = return $ Ext x
 
 instance Rename () where
   rename = return
-
-instance Rename ExtRetType where
-  rename = fmap ExtRetType . mapM rename . retTypeValues
 
 instance Rename d => Rename (DimIndex d) where
   rename (DimFix i)       = DimFix <$> rename i
@@ -324,4 +323,5 @@ type Renameable lore = (Rename (LetAttr lore),
                         Rename (FParamAttr lore),
                         Rename (LParamAttr lore),
                         Rename (RetType lore),
+                        Rename (BranchType lore),
                         Rename (Op lore))

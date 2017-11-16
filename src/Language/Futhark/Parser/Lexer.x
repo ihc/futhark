@@ -38,7 +38,8 @@ import Language.Futhark.Syntax (BinOp(..))
 @binlit = 0[bB][01][01_]*
 @romlit = 0[rR][IVXLCM][IVXLCM_]*
 @intlit = @hexlit|@binlit|@declit|@romlit
-@reallit = (([0-9][0-9_]*("."[0-9]?[0-9_]*)?))([eE][\+\-]?[0-9]+)?
+@reallit = (([0-9][0-9_]*("."[0-9][0-9_]*)?))([eE][\+\-]?[0-9]+)?
+@hexreallit = 0[xX][0-9a-fA-F][0-9a-fA-F_]*"."[0-9a-fA-F][0-9a-fA-F_]*([pP][\+\-]?[0-9]+)
 
 @field = [a-zA-Z0-9] [a-zA-Z0-9_]*
 
@@ -48,13 +49,16 @@ import Language.Futhark.Syntax (BinOp(..))
 @unop = ("!"|"~")
 @qualunop = (@identifier ".")+ @unop
 
-@symbols = ("+"|"-"|"*"|"/"|"%"|"="|"!"|">"|"<"|"|"|"&"|"^"|".")
-@binop = @symbols+
+@opchar = ("+"|"-"|"*"|"/"|"%"|"="|"!"|">"|"<"|"|"|"&"|"^"|".")
+@binop = ("+"|"-"|"*"|"/"|"%"|"="|"!"|">"|"<"|"|"|"&"|"^") @opchar*
 @qualbinop = (@identifier ".")+ @binop
+
+@doc = "-- |"[^\n]*(\n$white*"--"[^\n]*)*
 
 tokens :-
 
   $white+                               ;
+  @doc                     { tokenM $ return . DOC . T.unpack . T.unlines . map (T.drop 2 . T.stripStart) . T.split (== '\n') . T.drop 2 }
   "--"[^\n]*                            ;
   "="                      { tokenC EQU }
   "("                      { tokenC LPAR }
@@ -69,10 +73,15 @@ tokens :-
   "->"                     { tokenC RIGHT_ARROW }
   "<-"                     { tokenC LEFT_ARROW }
   ":"                      { tokenC COLON }
+  "."                      { tokenC DOT }
   "@"                      { tokenC AT }
   "\"                      { tokenC BACKSLASH }
   "'"                      { tokenC APOSTROPHE }
   "#"                      { tokenC HASH }
+  "..<"                    { tokenC TWO_DOTS_LT }
+  "..>"                    { tokenC TWO_DOTS_GT }
+  "..."                    { tokenC THREE_DOTS }
+  ".."                     { tokenC TWO_DOTS }
 
   @declit                  { tokenM $ return . DECLIT . readIntegral . T.filter (/= '_') }
 
@@ -88,6 +97,9 @@ tokens :-
   @reallit f32             { tokenM $ fmap F32LIT . tryRead "f32" . suffZero . T.filter (/= '_') . T.takeWhile (/='f') }
   @reallit f64             { tokenM $ fmap F64LIT . tryRead "f64" . suffZero . T.filter (/= '_') . T.takeWhile (/='f') }
   @reallit                 { tokenM $ fmap REALLIT . tryRead "f64" . suffZero . T.filter (/= '_') }
+  @hexreallit f32          { tokenM $ fmap F32LIT . readHexRealLit "f32" . suffZero . T.filter (/= '_') . fst . T.breakOn (T.pack "f32") }
+  @hexreallit f64          { tokenM $ fmap F64LIT . readHexRealLit "f64" . suffZero . T.filter (/= '_') . fst . T.breakOn (T.pack "f64") }
+  @hexreallit              { tokenM $ fmap REALLIT . readHexRealLit "f64" . suffZero . T.filter (/= '_') }
   "'" @charlit "'"         { tokenM $ fmap CHARLIT . tryRead "char" }
   \" @stringcharlit* \"    { tokenM $ fmap STRINGLIT . tryRead "string"  }
 
@@ -95,6 +107,8 @@ tokens :-
   @identifier "["          { tokenM $ fmap INDEXING . indexing . T.takeWhile (/='[') }
   @qualidentifier          { tokenM $ fmap (uncurry QUALID) . mkQualId }
   @qualidentifier "["      { tokenM $ fmap (uncurry QUALINDEXING) . mkQualId . T.takeWhile (/='[') }
+  @identifier "." "("      { tokenM $ fmap (QUALPAREN []) . indexing . T.init . T.takeWhile (/='(') }
+  @qualidentifier "." "("  { tokenM $ fmap (uncurry QUALPAREN) . mkQualId . T.init . T.takeWhile (/='(') }
 
   @unop                    { tokenS $ UNOP . nameFromText }
   @qualunop                { tokenM $ fmap (uncurry QUALUNOP) . mkQualId }
@@ -238,6 +252,31 @@ fromRoman s =
     Nothing -> 0
     Just (d,n) -> n+fromRoman (T.drop (T.length d) s)
 
+fromHexRealLit :: RealFloat a => T.Text -> Maybe a
+fromHexRealLit s =
+  let num =  (T.drop 2 s) in
+  -- extract number into integer, fractional and (optional) exponent
+  let comps = (T.split (\x -> x == '.' || x == 'p' || x == 'P') num) in
+  case comps of
+    [i, f, p] ->
+        let int_part = readIntegral (T.pack ("0x" ++ (T.unpack i)))
+            frac_part = readIntegral (T.pack ("0x" ++ (T.unpack f)))
+            exponent = if ((T.pack "-") `T.isPrefixOf` p)
+                       then -1 * (readIntegral p)
+                       else readIntegral p
+
+            frac_len = T.length f
+            frac_val = (fromIntegral frac_part) / (16.0 ** (fromIntegral frac_len))
+            total_val = ((fromIntegral int_part) + frac_val) * (2.0 ** (fromIntegral exponent)) in
+        Just (total_val)
+    _ -> Nothing
+
+readHexRealLit :: RealFloat a => String -> T.Text -> Alex a
+readHexRealLit desc s =
+  case fromHexRealLit s of
+    Just (n) -> return n
+    Nothing -> fail $ "Invalid " ++ desc ++ " literal: " ++ T.unpack s
+
 alexEOF = return ((0,0,0), (0,0,0), EOF)
 
 -- | A value tagged with a source location.
@@ -256,6 +295,7 @@ data Token = ID Name
            | INDEXING Name
            | QUALID [Name] Name
            | QUALINDEXING [Name] Name
+           | QUALPAREN [Name] Name
            | UNOP Name
            | QUALUNOP [Name] Name
            | SYMBOL BinOp [Name] Name
@@ -281,6 +321,11 @@ data Token = ID Name
            | BACKSLASH
            | APOSTROPHE
            | HASH
+           | DOT
+           | TWO_DOTS
+           | TWO_DOTS_LT
+           | TWO_DOTS_GT
+           | THREE_DOTS
            | LPAR
            | RPAR
            | RPAR_THEN_LBRACKET
@@ -334,7 +379,6 @@ data Token = ID Name
            | STREAM_MAPPER
            | STREAM_RED
            | STREAM_REDPER
-           | STREAM_SEQ
            | INCLUDE
            | IMPORT
            | ENTRY
@@ -344,9 +388,11 @@ data Token = ID Name
            | OPEN
            | LOCAL
 
+           | DOC String
+
            | EOF
 
-             deriving (Show, Eq)
+             deriving (Show, Eq, Ord)
 
 scanTokensText :: FilePath -> T.Text -> Either String [L Token]
 scanTokensText file = scanTokens file . BS.fromStrict . T.encodeUtf8

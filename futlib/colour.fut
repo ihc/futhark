@@ -1,17 +1,31 @@
--- Colour manipulation library.
+-- | Colour manipulation library.
 --
 -- Adapted from the gloss library by Ben Lippmeier:
 -- https://hackage.haskell.org/package/gloss
 
 import "/futlib/math"
 
+-- | A colour that can be converted back and forth between an RGBA
+-- representation.  Not very useful by itself, but using just this
+-- interface one can generate a lot of other useful functions via the
+-- colourspace parametric module.
 module type colour = {
   type colour
 
+  -- | Construct a colour from R, G, B and A channels, each of which
+  -- must be a floating-point number between 0.0 and 1.0.  The
+  -- concrete representation need not be able to handle the full
+  -- precision of each channel.  Thus, from_rgba and to_rgba need not
+  -- be inverse of each other (but should be close).
   val from_rgba: f32 -> f32 -> f32 -> f32 -> colour
+
+  -- | Convert a colour to four R, G, B and A channels, each of which
+  -- is a floating-point number between 0.0 and 1.0.
   val to_rgba: colour -> (f32, f32, f32, f32)
 }
 
+-- | A colour representation that encodes the four RGBA channels as a
+-- byte each in a 32-bit word, using the order A-R-G-B.
 module argb_colour: colour with colour = i32 = {
   -- ARGB storage.
   type colour = i32
@@ -20,18 +34,19 @@ module argb_colour: colour with colour = i32 = {
     if x < 0f32 then 0f32 else if x > 1f32 then 1f32 else x
 
   let from_rgba (r: f32) (g: f32) (b: f32) (a: f32): colour =
-    ((i32 (clamp_channel a * 255f32) << 24) |
-     (i32 (clamp_channel r * 255f32) << 16) |
-     (i32 (clamp_channel g * 255f32) << 8)  |
-     (i32 (clamp_channel b * 255f32)))
+    ((t32 (clamp_channel a * 255f32) << 24) |
+     (t32 (clamp_channel r * 255f32) << 16) |
+     (t32 (clamp_channel g * 255f32) << 8)  |
+     (t32 (clamp_channel b * 255f32)))
 
   let to_rgba (x: colour): (f32,f32,f32,f32) =
-    (f32 ((x>>16) & 0xFF) / 255f32,
-     f32 ((x>>8) & 0xFF) / 255f32,
-     f32 ((x>>0) & 0xFF) / 255f32,
-     f32 ((x>>24) & 0xFF) / 255f32)
+    (r32 ((x>>16) & 0xFF) / 255f32,
+     r32 ((x>>8) & 0xFF) / 255f32,
+     r32 ((x>>0) & 0xFF) / 255f32,
+     r32 ((x>>24) & 0xFF) / 255f32)
 }
 
+-- | A colour representation and a host of useful functions and constants.
 module type colourspace = {
   include colour
 
@@ -40,13 +55,13 @@ module type colourspace = {
   val scale: colour -> f32 -> colour
   val mix: f32 -> colour -> f32 -> colour -> colour
 
-  -- Brighten 20%
+  -- | Brighten 20%.
   val bright: colour -> colour
-  -- Dim 20%
+  -- | Dim 20%.
   val dim: colour -> colour
-  -- 20% lighter
+  -- | 20% lighter.
   val light: colour -> colour
-  -- 20% darker
+  -- | 20% darker.
   val dark: colour -> colour
 
   -- Basic colours
@@ -63,10 +78,12 @@ module type colourspace = {
   val magenta: colour
   val violet: colour
 
-  -- Grayness from 0-1.
+  -- | Grayness from 0-1.
   val gray: f32 -> colour
 }
 
+-- | Given a colour representation, construct a colourspace with all
+-- the handy functions and constants.
 module colourspace(C: colour): colourspace with colour = C.colour = {
   open C
 
@@ -153,4 +170,5 @@ module colourspace(C: colour): colourspace with colour = C.colour = {
   let gray (d: f32): colour = from_rgba d d d 1f32
 }
 
-module argb = colourspace(argb_colour)
+-- | An ARGB colour space - simply colourspace applied to argb.
+module argb: colourspace with colour = argb_colour.colour = colourspace argb_colour

@@ -40,7 +40,8 @@ import Futhark.MonadFreshNames
 class (Attributes lore,
        FParamAttr lore ~ DeclType,
        LParamAttr lore ~ Type,
-       RetType lore ~ ExtRetType,
+       RetType lore ~ DeclExtType,
+       BranchType lore ~ ExtType,
        SetType (LetAttr lore)) =>
       Bindable lore where
   mkExpPat :: [(Ident,Bindage)] -> [(Ident,Bindage)] -> Exp lore -> Pattern lore
@@ -68,18 +69,17 @@ class (Attributes (Lore m),
   mkLetNamesM :: [(VName, Bindage)] -> Exp (Lore m) -> m (Stm (Lore m))
   addStm      :: Stm (Lore m) -> m ()
   collectStms :: m a -> m (a, [Stm (Lore m)])
+  certifying :: Certificates -> m a -> m a
 
 mkLetM :: MonadBinder m => Pattern (Lore m) -> Exp (Lore m) -> m (Stm (Lore m))
-mkLetM pat e = do
-  attr <- mkExpAttrM pat e
-  return $ Let pat attr e
+mkLetM pat e = Let pat <$> (StmAux mempty <$> mkExpAttrM pat e) <*> pure e
 
 letBind :: MonadBinder m =>
            Pattern (Lore m) -> Exp (Lore m) -> m [Ident]
 letBind pat e = do
   bnd <- mkLetM pat e
   addStm bnd
-  return $ patternValueIdents $ bindingPattern bnd
+  return $ patternValueIdents $ stmPattern bnd
 
 letBind_ :: MonadBinder m =>
             Pattern (Lore m) -> Exp (Lore m) -> m ()
@@ -89,7 +89,7 @@ mkLet :: Bindable lore => [(Ident,Bindage)] -> [(Ident,Bindage)] -> Exp lore -> 
 mkLet ctx val e =
   let pat = mkExpPat ctx val e
       attr = mkExpAttr pat e
-  in Let pat attr e
+  in Let pat (StmAux mempty attr) e
 
 mkLet' :: Bindable lore =>
           [Ident] -> [Ident] -> Exp lore -> Stm lore
@@ -111,7 +111,7 @@ letBindNames :: MonadBinder m =>
 letBindNames names e = do
   bnd <- mkLetNamesM names e
   addStm bnd
-  return $ patternValueIdents $ bindingPattern bnd
+  return $ patternValueIdents $ stmPattern bnd
 
 letBindNames' :: MonadBinder m =>
                  [VName] -> Exp (Lore m) -> m [Ident]

@@ -11,7 +11,11 @@ be used before they are fully defined.  It is a good idea to have a
 basic grasp of Futhark (or some other functional programming language)
 before reading this reference.  An ambiguous grammar is given for the
 full language.  The text describes how ambiguities are resolved in
-practice (things like operator precedence).
+practice (for example by applying rules of operator precedence).
+
+This reference describes only the language itself.  Documentation for
+the basis library is `available elsewhere
+<https://futhark-lang.org/docs/>`_.
 
 Identifiers and Keywords
 ------------------------
@@ -20,16 +24,19 @@ Identifiers and Keywords
    id: `letter` (`letter` | "_" | "'")* | "_" `id`
    quals: (`id` ".")+
    qualid: `id` | `quals` `id`
-   binop: `symbol`+
+   binop: `opstartchar` `opchar`*
    qualbinop: `binop` | `quals` `binop`
    fieldid: `decimal` | `id`
-   symbol: "+" | "-" | "*" | "/" | "%" | "=" | "!" | ">" | "<" | "|" | "&" | "^" | "."
+   opstartchar = "+" | "-" | "*" | "/" | "%" | "=" | "!" | ">" | "<" | "|" | "&" | "^"
+   opchar: `opstartchar` | "."
 
 Many things in Futhark are named. When we are defining something, we
 give it an unqualified name (`id`).  When referencing something inside
 a module, we use a qualified name (`qualid`).  The fields of a record
-are named with `fieldid`s.  Note that a `fieldid` can be decimal
-numbers.
+are named with `fieldid`.  Note that a `fieldid` can be a decimal
+number.  Futhark has three distinct name spaces: terms, module types,
+and types.  Modules (including parametric modules) and values both
+share the term namespace.
 
 Primitive Types and Values
 --------------------------
@@ -55,6 +62,10 @@ and decimal literals are of type ``f64``.  Hexadecimal literals are
 supported by prefixing with ``0x``, and binary literals by prefixing
 with ``0b``.
 
+Floats can also be written in hexadecimal format such as ``0x1.fp3``,
+instead of the usual decimal notation. Here, ``0x1.f`` evaluates to
+``1 15/16`` and the ``p3`` multiplies it by ``2^3 = 8``.
+
 .. productionlist::
    intnumber: (`decimal` | `hexadecimal` | `binary`) [`int_type`]
    decimal: `decdigit` (`decdigit` |"_")*
@@ -63,10 +74,13 @@ with ``0b``.
 
 .. productionlist::
    floatnumber: (`pointfloat` | `exponentfloat`) [`float_type`]
-   pointfloat: [`intpart`] `fraction` | `intpart` "."
+   pointfloat: [`intpart`] `fraction`
    exponentfloat: (`intpart` | `pointfloat`) `exponent`
+   hexadecimalfloat: 0 ("x" | "X") `hexintpart` `hexfraction` ("p"|"P") ["+" | "-"] `decdigit`+
    intpart: `decdigit` (`decdigit` |"_")*
    fraction: "." `decdigit` (`decdigit` |"_")*
+   hexintpart: `hexdigit` (`hexdigit` | "_")*
+   hexfraction: "." `hexdigit` (`hexdigit` |"_")*
    exponent: ("e" | "E") ["+" | "-"] `decdigit`+
 
 .. productionlist::
@@ -74,13 +88,6 @@ with ``0b``.
    hexdigit: `decdigit` | "a"..."f" | "A"..."F"
    bindigit: "0" | "1"
 
-Numeric values can be converted between different types by using the
-desired type name as a function.  E.g., ``i32(1.0f32)`` would convert
-the floating-point number ``1.0`` to a 32-bit signed integer.
-Conversion from floating-point to integers is done by truncation.
-
-These can also be converted to numbers (1 for true, 0 for false) by
-using the desired numeric type as a function.
 
 Compound Types and Values
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -102,7 +109,7 @@ type ``()``.
    tuple_type: "(" ")" | "(" `type` ("[" "," `type` "]")* ")"
    record_type: "{" "}" | "{" `fieldid` ":" `type` ("," `fieldid` ":" `type`)* "}"
    type_arg: "[" [`dim`] "]" | `type`
-   dim: `qualid` | `decimal` | "#" `id`
+   dim: `qualid` | `decimal`
 
 An array value is written as a nonempty sequence of comma-separated
 values enclosed in square brackets: ``[1,2,3]``.  An array type is
@@ -154,18 +161,19 @@ literals and variables, but also more complicated forms.
 
 .. productionlist::
    atom:   `literal`
-       : | `qualid`
+       : | `qualid` ("." `fieldid`)*
        : | `stringlit`
        : | "empty" "(" `type` ")"
        : | "(" ")"
-       : | "(" `exp` ")"
+       : | "(" `exp` ")" ("." `fieldid`)*
        : | "(" `exp` ("," `exp`)* ")"
        : | "{" "}"
        : | "{" field ("," `field`)* "}"
        : | `qualid` "[" `index` ("," `index`)* "]"
        : | "(" `exp` ")" "[" `index` ("," `index`)* "]"
+       : | `quals`."(" `exp` ")"
        : | "[" `exp` ("," `exp`)* "]"
-       : | "#" `fieldid` `exp`
+       : | "[" `exp` [".." `exp`] "..." `exp` "]"
    exp:   `atom`
       : | `exp` `qualbinop` `exp`
       : | `exp` `exp`
@@ -174,7 +182,7 @@ literals and variables, but also more complicated forms.
       : | "let" `type_param`* `pat` "=" `exp` "in" `exp`
       : | "let" `id` "[" `index` ("," `index`)* "]" "=" `exp` "in" `exp`
       : | "let" `id` `type_param`* `pat`+ [":" `type`] "=" `exp` "in" `exp`
-      : | "loop" "(" `type_param`* `pat` [("=" `exp`)] ")" `loopform` "do" `exp`
+      : | "loop" `type_param`* `pat` [("=" `exp`)] `loopform` "do" `exp`
       : | "reshape" `exp` `exp`
       : | "rearrange" "(" `nat_int`+ ")" `exp`
       : | "rotate" ["@" `nat_int`] `exp` `exp`
@@ -187,17 +195,16 @@ literals and variables, but also more complicated forms.
       : | "map" `fun` `exp`+
       : | "reduce" `fun` `exp` `exp`
       : | "reduce_comm" `fun` `exp` `exp`
-      : | "reduce" `fun` `exp` `exp`
       : | "scan" `fun` `exp` `exp`
       : | "filter" `fun` `exp`
       : | "partition" "(" `fun`+ ")" `exp`
       : | "stream_map" `fun` `exp`
       : | "stream_map_per" `fun` `exp`
       : | "stream_red" `fun` `exp` `exp`
-      : | "stream_map_per" `fun` `exp` `exp`
+      : | "stream_red_per" `fun` `exp` `exp`
       : | "stream_seq" `fun` `exp` `exp`
    field:   `fieldid` "=" `exp`
-        : | `exp`
+        : | `id`
    pat:   `id`
       : |  "_"
       : | "(" ")"
@@ -209,6 +216,17 @@ literals and variables, but also more complicated forms.
    loopform :   "for" `id` "<" `exp`
             : | "for" `pat` "in" `exp`
             : | "while" `exp`
+   index:   `exp` [":" [`exp`]] [":" [`exp`]]
+        : | [`exp`] ":" `exp` [":" [`exp`]]
+        : | [`exp`] [":" `exp`] ":" [`exp`]
+   nat_int : `decdigit`+
+   fun:   `qualid`
+      : | "(" `qualid` `atom`+ ")"
+      : |  "#" `fieldid`
+      : | "(" "\" `type_param`* `pat`+ [":" `type`] "->" `exp` ")"
+      : | "(" `qualbinop` ")"
+      : | "(" `exp` `qualbinop` ")"
+      : | "(" `qualbinop` `exp` ")"
 
 Some of the built-in expression forms have parallel semantics, but it
 is not guaranteed that the the parallel constructs in Futhark are
@@ -225,8 +243,13 @@ implementation is resolved via a combination of lexer and grammar
 transformations.  For ease of understanding, they are presented here
 in natural text.
 
-* A type ascription (`exp` ``:`` `type`) cannot appear as an array
-  index, as it collides with the syntax for slicing.
+* An expression ``x.y`` may either be a reference to the name ``y`` in
+  the module ``x``, or the field ``y`` in the record ``x``.  Modules
+  and values occupy the same name space, so this is disambiguated by
+  the type of ``x``.
+
+* A type ascription (``exp : type``) cannot appear as an array
+  index, as it conflicts with the syntax for slicing.
 
 * In ``f [x]``, there is am ambiguity between indexing the array ``f``
   at position ``x``, or calling the function ``f`` with the singleton
@@ -306,20 +329,16 @@ Evaluates to a tuple containing ``N`` values.  Equivalent to ``(1=e1,
 .....................
 
 A record expression consists of a comma-separated sequence of *field
-expressions*.  A record expression is evaluated by creating an empty
-record, then processing the field expressions from left to right.
-Each field expression adds fields to the record being constructed.  A
-field expression can take one of two forms:
+expressions*.  Each field expression defines the value of a field in
+the record.  A field expression can take one of two forms:
 
-  ``f = e``: adds a field with the name ``f`` and the value resulting
-  from evaluating ``e``.
+  ``f = e``: defines a field with the name ``f`` and the value
+  resulting from evaluating ``e``.
 
-  ``e``: the expression ``e`` must evaluate to a record, whose fields
-  are added to the record being constructed.
+  ``f``: defines a field with the name ``f`` and the value of the
+  variable ``f`` in scope.
 
-If a field expression attempts to add a field that already exists in
-the record being constructed, the new value for the field supercedes
-the old one.
+Each field may only be defined once.
 
 ``a[i]``
 ........
@@ -362,11 +381,46 @@ empty arrays must be constructed with the ``empty`` construct.  This
 restriction is due to limited type inference in the Futhark compiler,
 and will hopefully be fixed in the future.
 
-``#f e``
+``[x..y...z]``
+..............
+
+Construct an integer array whose first element is ``x`` and which
+proceeds stride of ``y-x`` until reaching ``z`` (inclusive).  The
+``..y`` part can be elided in which case a stride of 1 is used.  The
+stride may not be zero.  An empty array is returned in cases where
+``z`` would never be reached or ``x`` and ``y`` are the same value.
+
+``[x..y..<z]``
+...............
+
+Construct an integer array whose first elements is ``x``, and which
+proceeds upwards with a stride of ``y`` until reaching ``z``
+(exclusive).  The ``..y`` part can be elided in which case a stride of
+1 is used.  An empty array is returned in cases where ``z`` would
+never be reached or ``x`` and ``y`` are the same value.
+
+``[x..y..>z]``
+...............
+
+Construct an integer array whose first elements is ``x``, and which
+proceeds downwards with a stride of ``y`` until reaching ``z``
+(exclusive).  The ``..y`` part can be elided in which case a stride of
+-1 is used.  An empty array is returned in cases where ``z`` would
+never be reached or ``x`` and ``y`` are the same value.
+
+``e.f``
 ........
 
 Access field ``f`` of the expression ``e``, which must be a record or
 tuple.
+
+``m.(e)``
+.........
+
+Evaluate the expression ``e`` with the module ``m`` locally opened, as
+if by ``open``.  This can make some expressions easier to read and
+write, without polluting the global scope with a declaration-level
+``open``.
 
 ``x`` *binop* ``y``
 ...................
@@ -484,8 +538,8 @@ aliasing any free variables in ``e``.  The function is not in scope of
 itself, and hence cannot be recursive.  See also `Shape
 Declarations`_.
 
-``loop (pat = initial) for x in a do loopbody``
-...............................................
+``loop pat = initial for x in a do loopbody``
+.............................................
 
 1. Bind ``pat`` to the initial values given in ``initial``.
 
@@ -501,13 +555,13 @@ environment.  I.e., ``loop (x) = ...`` is equivalent to ``loop (x = x)
 
 See also `Shape Declarations`_.
 
-``loop (pat = initial) for x < n do loopbody``
+``loop pat = initial for x < n do loopbody``
+............................................
+
+Equivalent to ``loop (pat = initial) for x in [0..1..<n] do loopbody``.
+
+``loop pat = initial = while cond do loopbody``
 ...............................................
-
-Equivalent to ``loop (pat = initial) for x in iota n do loopbody``.
-
-``loop (pat = initial) = while cond do loopbody``
-............................................................
 
 1. Bind ``pat`` to the initial values given in ``initial``.
 
@@ -517,25 +571,6 @@ Equivalent to ``loop (pat = initial) for x in iota n do loopbody``.
 3. Return the final value of ``pat``.
 
 See also `Shape Declarations`_.
-
-``iota n``
-...........
-
-An array of the integers from ``0`` to ``n-1``.  The ``n`` argument
-can be any integral type.  The elements of the array will have the
-same type as ``n``.
-
-``shape a``
-..............
-
-The shape of array ``a`` as an integer array.  It is often more
-readable to use shape declaration names instead of ``shape``.
-
-``replicate n x``
-...................
-
-An array consisting of ``n`` copies of ``a``.  The ``n`` argument must
-be of type ``i32``.
 
 ``reshape (d_1, ..., d_n) a``
 ...............................
@@ -688,7 +723,7 @@ elements of the partitions retain their original relative positions.
 This ``scatter`` expression calculates the equivalent of this imperative
 code::
 
-  for index in 0..shape(is)[0]-1:
+  for index in 0..length is-1:
     i = is[index]
     v = vs[index]
     as[i] = v
@@ -709,23 +744,14 @@ parameters), as well as in return types, *shape declarations* may be
 used to express invariants about the shapes of arrays
 that are accepted or produced by the function.  For example::
 
-  let f (a: [#n]i32) (b: [#n]i32): [n]i32 =
-    map (+) a b
-
-When prefixed with a ``#`` character, a name is *freshly bound*,
-whilst an unadorned name must be in scope.  In the example above,
-``#`` is not used in the return type, because we wish to refer to the
-``n`` bound by the parameters.  If we refer to the same freshly bound
-variable in multiple parameters (as above), each occurence must be
-prefixed with ``#``.  The sizes can also be explicitly quantified::
-
   let f [n] (a: [n]i32) (b: [n]i32): [n]i32 =
     map (+) a b
 
-This has the same meaning as above.  It is an error to mix explicit
-and implicit sizes.  Note that the ``[n]`` parameter need not be
-explicitly passed when calling ``f``.  Any explicitly bound size must
-be used in a parameters.  This is an error::
+We use a *shape parameter*, ``[n]``, to explicitly quantify the names
+of shapes.  The ``[n]`` parameter need not be explicitly passed when
+calling ``f``.  Rather, its value is implicitly deduced from the
+arguments passed for the value parameters.  Any size parameter must be
+used in a value parameter.  This is an error::
 
   let f [n] (x: i32) = n
 
@@ -749,7 +775,7 @@ Declarations
 
 .. productionlist::
    dec:   `fun_bind` | `val_bind` | `type_bind` | `mod_bind` | `mod_type_bind`
-      : | "open" `mod_exp`+
+      : | "open" `mod_exp`
       : | `default_dec`
       : | "import" `stringlit`
 

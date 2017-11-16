@@ -44,12 +44,18 @@ optimiseBody (Body () bnds res) =
   Body () <$> (concat <$> mapM optimiseStm bnds) <*> pure res
 
 optimiseStm :: Stm Kernels -> TileM [Stm Kernels]
-optimiseStm (Let pat () (Op (Kernel desc cs space ts body))) = do
+optimiseStm (Let pat aux (Op old_kernel@(Kernel desc space ts body))) = do
   (extra_bnds, space', body') <- tileInKernelBody mempty initial_variance space body
-  return $ extra_bnds ++ [Let pat () $ Op $ Kernel desc cs space' ts body']
+  let new_kernel = Kernel desc space' ts body'
+  -- XXX: we should not change the type of the kernel (such as by
+  -- changing the number of groups being used for a kernel that
+  -- returns a result-per-group).
+  if kernelType old_kernel == kernelType new_kernel
+    then return $ extra_bnds ++ [Let pat aux $ Op new_kernel]
+    else return [Let pat aux $ Op old_kernel]
   where initial_variance = M.map mempty $ scopeOfKernelSpace space
-optimiseStm (Let pat () e) =
-  pure <$> (Let pat () <$> mapExpM optimise e)
+optimiseStm (Let pat aux e) =
+  pure <$> (Let pat aux <$> mapExpM optimise e)
   where optimise = identityMapper { mapOnBody = const optimiseBody }
 
 tileInKernelBody :: Names -> VarianceTable
@@ -216,17 +222,10 @@ is1_5dTileable branch_variant kspace variance block_size arr block_param = do
             return (gtid, gdim, ltid, gdim)
 
           inner_ltid <- newVName "inner_ltid"
-          smaller <- newVName "group_size_is_smaller"
           inner_ldim <- newVName "inner_ldim"
-          let is_group_size_smaller =
-                mkLet' [] [Ident smaller $ Prim Bool] $
-                BasicOp $ CmpOp (CmpSlt Int32) (spaceGroupSize kspace) inner_gdim
-              smaller_body = Body () [] [spaceGroupSize kspace]
-              not_smaller_body = Body () [] [inner_gdim]
-              compute_tiled_group_size =
+          let compute_tiled_group_size =
                 mkLet' [] [Ident inner_ldim $ Prim int32] $
-                If (Var smaller) smaller_body not_smaller_body [Prim int32]
-
+                BasicOp $ BinOp (SMin Int32) (spaceGroupSize kspace) inner_gdim
               structure = NestedThreadSpace $ outer ++ [(inner_gtid, inner_gdim,
                                                          inner_ltid, Var inner_ldim)]
           ((num_threads, num_groups), num_bnds) <- runBinder $ do
@@ -247,7 +246,7 @@ is1_5dTileable branch_variant kspace variance block_size arr block_param = do
                                , spaceNumThreads = num_threads
                                , spaceStructure = structure
                                }
-          return ([is_group_size_smaller, compute_tiled_group_size] ++ num_bnds,
+          return (compute_tiled_group_size : num_bnds,
                   kspace')
   return $ do
     (outer_block_param, kstms) <- tile1d kspace block_size block_param
@@ -276,16 +275,16 @@ tile1d kspace block_size block_param = do
     name <- newVName $ baseString (paramName outer_block_param) ++ "_elem"
     return $
       mkLet' [] [Ident name $ rowType $ paramType outer_block_param] $
-      BasicOp $ Index [] (paramName outer_block_param) [DimFix $ Var ltid]
+      BasicOp $ Index (paramName outer_block_param) [DimFix $ Var ltid]
 
   let block_cspace = [(ltid,block_size)]
       block_pe =
         PatElem (paramName block_param) BindVar $ paramType outer_block_param
       write_block_stms =
-        [ Let (Pattern [] [block_pe]) () $ Op $
+        [ Let (Pattern [] [block_pe]) (defAux ()) $ Op $
           Combine block_cspace [patElemType pe] [] $
           Body () [read_elem_bnd] [Var $ patElemName pe]
-        | pe <- patternElements $ bindingPattern read_elem_bnd ]
+        | pe <- patternElements $ stmPattern read_elem_bnd ]
 
   return (outer_block_param, write_block_stms)
 
@@ -311,7 +310,7 @@ is2dTileable branch_variant kspace variance block_size arr block_param = do
 
     elem_name <- newVName $ baseString (paramName outer_block_param) ++ "_elem"
     let read_elem_bnd = mkLet' [] [Ident elem_name $ Prim pt] $
-                        BasicOp $ Index [] (paramName outer_block_param) $
+                        BasicOp $ Index (paramName outer_block_param) $
                         fullSlice (paramType outer_block_param) [DimFix $ Var invariant_i]
 
     let block_size_2d = Shape $ rearrangeShape inner_perm [tile_size, block_size]
@@ -322,7 +321,7 @@ is2dTileable branch_variant kspace variance block_size arr block_param = do
           PatElem block_name_2d BindVar $
           rowType (paramType outer_block_param) `arrayOfShape` block_size_2d
         write_block_stm =
-         Let (Pattern [] [block_pe]) () $
+         Let (Pattern [] [block_pe]) (defAux ()) $
           Op $ Combine block_cspace [Prim pt] [(global_i, global_d)] $
           Body () [read_elem_bnd] [Var elem_name]
 
@@ -331,9 +330,9 @@ is2dTileable branch_variant kspace variance block_size arr block_param = do
                           rearrangeType inner_perm $ patElemType block_pe
     let index_block_kstms =
           [mkLet' [] [block_param_aux] $
-            BasicOp $ Rearrange [] inner_perm block_name_2d,
+            BasicOp $ Rearrange inner_perm block_name_2d,
            mkLet' [] [paramIdent block_param] $
-            BasicOp $ Index [] (identName block_param_aux) $
+            BasicOp $ Index (identName block_param_aux) $
             fullSlice (identType block_param_aux) [DimFix $ Var variant_i]]
 
     return (outer_block_param, write_block_stm : index_block_kstms)
@@ -361,7 +360,7 @@ varianceInStms = foldl varianceInStm
 
 varianceInStm :: VarianceTable -> Stm InKernel -> VarianceTable
 varianceInStm variance bnd =
-  foldl' add variance $ patternNames $ bindingPattern bnd
+  foldl' add variance $ patternNames $ stmPattern bnd
   where add variance' v = M.insert v binding_variance variance'
         look variance' v = S.insert v $ M.findWithDefault mempty v variance'
         binding_variance = mconcat $ map (look variance) $ S.toList (freeInStm bnd)

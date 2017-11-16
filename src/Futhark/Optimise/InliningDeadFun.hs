@@ -10,6 +10,7 @@ import Control.Monad.Reader
 import Control.Monad.Identity
 
 import Data.List
+import Data.Loc
 import Data.Maybe
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -23,12 +24,13 @@ import Futhark.Binder
 import Futhark.Pass
 
 aggInlining :: CallGraph -> [FunDef] -> [FunDef]
-aggInlining cg = filter (isJust . funDefEntryPoint) . recurse
+aggInlining cg = filter keep . recurse
   where noInterestingCalls :: S.Set Name -> FunDef -> Bool
         noInterestingCalls interesting fundec =
           case M.lookup (funDefName fundec) cg of
-            Just calls | not $ any (`elem` interesting) calls -> True
-            _                                                 -> False
+            Just calls | not $ any (`elem` interesting') calls -> True
+            _                                                  -> False
+            where interesting' = funDefName fundec `S.insert` interesting
 
         recurse funs =
           let interesting = S.fromList $ map funDefName funs
@@ -39,6 +41,15 @@ aggInlining cg = filter (isJust . funDefEntryPoint) . recurse
           in if null to_be_inlined then funs
              else inlined_but_entry_points ++
                   recurse (map (`doInlineInCaller` to_be_inlined) to_inline_in)
+
+        keep fundec = isJust (funDefEntryPoint fundec) || callsRecursive fundec
+
+        callsRecursive fundec = maybe False (any recursive) $
+                                M.lookup (funDefName fundec) cg
+
+        recursive fname = case M.lookup fname cg of
+                            Just calls -> fname `elem` calls
+                            Nothing -> False
 
 -- | @doInlineInCaller caller inlcallees@ inlines in @calleer@ the functions
 -- in @inlcallees@. At this point the preconditions are that if @inlcallees@
@@ -52,15 +63,13 @@ doInlineInCaller (FunDef entry name rtp args body) inlcallees =
   in FunDef entry name rtp args body'
 
 inlineInBody :: [FunDef] -> Body -> Body
-inlineInBody
-  inlcallees
-  (Body _ (bnd@(Let pat _ (Apply fname args rtp)):bnds) res) =
+inlineInBody inlcallees
+             (Body _ (bnd@(Let pat _ (Apply fname args _ (safety,loc,locs))):bnds) res) =
   let continue callbnds =
         callbnds `insertStms` inlineInBody inlcallees (mkBody bnds res)
       continue' (Body _ callbnds res') =
-        continue $ callbnds ++
-        zipWith reshapeIfNecessary (patternIdents pat)
-        (runReader (withShapes res') $ scopeOf callbnds)
+        continue $ addLocations safety (loc:locs) callbnds ++
+        zipWith reshapeIfNecessary (patternIdents pat) res'
   in case filter ((== fname) . funDefName) inlcallees of
        [] -> continue [bnd]
        fun:_ ->
@@ -72,18 +81,13 @@ inlineInBody
       addArgBnd (farg, aarg) body =
         reshapeIfNecessary farg aarg `insertStm` body
 
-      withShapes ses = do
-        ts <- mapM subExpType ses
-        return $
-          extractShapeContext (retTypeValues rtp) (map arrayDims ts) ++
-          ses
-
       reshapeIfNecessary ident se
         | t@Array{} <- identType ident,
           Var v <- se =
-            mkLet' [] [ident] $ shapeCoerce [] (arrayDims t) v
+            mkLet' [] [ident] $ shapeCoerce (arrayDims t) v
         | otherwise =
           mkLet' [] [ident] $ BasicOp $ SubExp se
+
 inlineInBody inlcallees (Body () (bnd:bnds) res) =
   let bnd' = inlineInStm inlcallees bnd
       Body () bnds' res' = inlineInBody inlcallees $ Body () bnds res
@@ -103,7 +107,8 @@ inlineInSOAC inlcallees = runIdentity . mapSOACM identitySOACMapper
                           }
 
 inlineInStm :: [FunDef] -> Stm -> Stm
-inlineInStm inlcallees (Let pat () e) = Let pat () $ mapExp (inliner inlcallees) e
+inlineInStm inlcallees (Let pat aux e) =
+  Let pat aux $ mapExp (inliner inlcallees) e
 
 inlineInLambda :: [FunDef] -> Lambda -> Lambda
 inlineInLambda inlcallees (Lambda params body ret) =
@@ -112,6 +117,20 @@ inlineInLambda inlcallees (Lambda params body ret) =
 inlineInExtLambda :: [FunDef] -> ExtLambda -> ExtLambda
 inlineInExtLambda inlcallees (ExtLambda params body ret) =
   ExtLambda params (inlineInBody inlcallees body) ret
+
+addLocations :: Safety -> [SrcLoc] -> [Stm] -> [Stm]
+addLocations caller_safety more_locs = map onStm
+  where onStm stm = stm { stmExp = onExp $ stmExp stm }
+        onExp (Apply fname args t (safety, loc,locs)) =
+          Apply fname args t (min caller_safety safety, loc,locs++more_locs)
+        onExp (BasicOp (Assert cond desc (loc,locs))) =
+          case caller_safety of
+            Safe -> BasicOp $ Assert cond desc (loc,locs++more_locs)
+            Unsafe -> BasicOp $ SubExp $ Constant Checked
+        onExp e = mapExp identityMapper { mapOnBody = const $ return . onBody
+                                        } e
+        onBody body =
+          body { bodyStms = addLocations caller_safety more_locs $ bodyStms body }
 
 -- | A composition of 'inlineAggressively' and 'removeDeadFunctions',
 -- to avoid the cost of type-checking the intermediate stage.

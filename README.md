@@ -11,14 +11,16 @@ language still lacks certain niceties and features.
 
 For more information, see [the website](http://futhark-lang.org).
 
-The [documentation is here](http://futhark.readthedocs.io).
+Also see the [compiler and language
+documentation](http://futhark.readthedocs.io) and the [basis library
+documentation](https://futhark-lang.org/docs).
 
 [Installation instructions here.](http://futhark.readthedocs.io/en/latest/installation.html)
 
 Statistics
 ==========
 
-[![Issue Stats](http://issuestats.com/github/HIPERFIT/futhark/badge/pr)](http://issuestats.com/github/HIPERFIT/futhark) [![Issue Stats](http://issuestats.com/github/HIPERFIT/futhark/badge/issue)](http://issuestats.com/github/HIPERFIT/futhark) [![Build Status](https://travis-ci.org/HIPERFIT/futhark.svg?branch=master)](https://travis-ci.org/HIPERFIT/futhark) [![Project Stats](https://www.openhub.net/p/futharkcompiler/widgets/project_thin_badge.gif)](https://www.openhub.net/p/futharkcompiler)
+[![Build Status](https://travis-ci.org/diku-dk/futhark.svg?branch=master)](https://travis-ci.org/diku-dk/futhark) [![Project Stats](https://www.openhub.net/p/futharkcompiler/widgets/project_thin_badge.gif)](https://www.openhub.net/p/futharkcompiler)
 
 Installation
 ============
@@ -49,7 +51,7 @@ Hacking
 
 We try to make use of Github issues for organising our work.  Issues
 tagged with
-[newbie-friendly](https://github.com/HIPERFIT/futhark/issues?q=is%3Aissue+is%3Aopen+label%3Anewbie-friendly)
+[newbie-friendly](https://github.com/diku-dk/futhark/issues?q=is%3Aissue+is%3Aopen+label%3Anewbie-friendly)
 do not require deep knowledge of the code base.
 
 Testing

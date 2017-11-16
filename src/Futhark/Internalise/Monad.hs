@@ -20,11 +20,13 @@ module Futhark.Internalise.Monad
   , allSubsts
   , addFunction
 
+  , maybeSpecialiseEarly
   , lookupFunction
   , lookupFunction'
   , lookupMod
   , lookupSubst
   , fulfillingPromise
+  , unSubst
 
   , bindingIdentTypes
   , bindingParamTypes
@@ -86,10 +88,10 @@ type ConstParams = [(Name,VName)]
 type Closure = [VName]
 
 -- | The type arguments to a polymorhic function.
-type SpecArgs = ([E.TypeBase E.Rank ()], [ExtType])
+type SpecArgs = ([E.TypeBase () ()], SpecParams)
 
--- | The type internalise arguments to a polymorhic function.
-type SpecParams = [ExtType]
+-- | The type internalise arguments to a polymorphic function.
+type SpecParams = [TypeBase Rank NoUniqueness]
 
 data FunBinding = FunBinding
   { polymorphicSpecialisations :: M.Map SpecParams FunInfo
@@ -101,7 +103,7 @@ data FunBinding = FunBinding
 type FunInfo = (Name, ConstParams, Closure,
                 [VName], [DeclType],
                 [FParam],
-                [(SubExp,Type)] -> Maybe ExtRetType)
+                [(SubExp,Type)] -> Maybe [DeclExtType])
 
 type FunTable = M.Map VName FunBinding
 
@@ -178,6 +180,8 @@ instance MonadBinder InternaliseM where
     InternaliseM . addStm
   collectStms (InternaliseM m) =
     InternaliseM $ collectStms m
+  certifying cs (InternaliseM m) =
+    InternaliseM $ certifying cs m
 
 runInternaliseM :: MonadFreshNames m =>
                    InternaliseM ()
@@ -221,13 +225,26 @@ lookupFunction fname types@(_, i_types) = do
   case M.lookup i_types $ polymorphicSpecialisations fb of
     Just info -> return info
     Nothing -> do
-      info <- polymorphicSpecialise fb types
+      info <- local (\env -> env { envDoBoundsChecks = True }) $
+              polymorphicSpecialise fb types
       let fb' = fb { polymorphicSpecialisations =
                        M.insert i_types info $ polymorphicSpecialisations fb }
       modify $ \s -> s { stateFtable = M.insert fname fb' $ stateFtable s }
       return info
   where bad =
           fail $ "Internalise.lookupFunction: Function '" ++ pretty fname ++ "' not found."
+
+-- Generate monomorphic specialisation early as a HACK to support
+-- recursive functions.
+maybeSpecialiseEarly :: VName -> Name -> [FParam] -> [DeclExtType] -> InternaliseM ()
+maybeSpecialiseEarly fname fname' params rettype = do
+  let info = (fname', mempty, mempty,
+              mempty, map declTypeOf params,
+              params,
+              applyRetType rettype params)
+      fb = FunBinding (M.singleton (map (rankShaped . paramType) params) info)
+           (\ts -> fail $ "Cannot have polymorphic recursive function. " ++ show ts)
+  modify $ \s -> s { stateFtable = M.insert fname fb $ stateFtable s }
 
 lookupMod :: VName -> InternaliseM ModBinding
 lookupMod mname = do
@@ -276,6 +293,11 @@ fulfillingPromise name = do
               fulfill name' v' promises
           | otherwise =
               return ()
+
+-- HACK
+unSubst :: VName -> InternaliseM ()
+unSubst name =
+  modify $ \s -> s { stateDecSubsts = M.delete name $ stateDecSubsts s }
 
 bindingIdentTypes :: [Ident] -> InternaliseM a
                   -> InternaliseM a
@@ -381,15 +403,15 @@ asserting m = do
   doBoundsChecks <- asks envDoBoundsChecks
   if doBoundsChecks
   then m
-  else return []
+  else return mempty
 
 -- | Execute the given action if 'envDoBoundsChecks' is true, otherwise
 -- just return an empty list.
 assertingOne :: InternaliseM VName
              -> InternaliseM Certificates
-assertingOne m = asserting $ fmap pure m
+assertingOne m = asserting $ Certificates . pure <$> m
 
-type DimTable = M.Map VName ExtDimSize
+type DimTable = M.Map VName ExtSize
 
 data TypeEnv = TypeEnv { typeEnvTypes :: TypeTable
                        , typeEnvDims  :: DimTable
@@ -415,7 +437,7 @@ runInternaliseTypeM bound (InternaliseTypeM m) = do
   let bound' = M.fromList $ zip (S.toList bound) [0..]
       dims = M.map Ext bound'
       new_env = TypeEnv types dims
-      new_state = (S.size bound + 1, bound', mempty)
+      new_state = (S.size bound, bound', mempty)
   (x, (_, substs, cm)) <- runStateT (runReaderT m new_env) new_state
   return (x, substs, cm)
 
@@ -425,7 +447,7 @@ withTypes ttable = local $ \env -> env { typeEnvTypes = ttable <> typeEnvTypes e
 withDims :: DimTable -> InternaliseTypeM a -> InternaliseTypeM a
 withDims dtable = local $ \env -> env { typeEnvDims = dtable <> typeEnvDims env }
 
-lookupDim :: VName -> InternaliseTypeM (Maybe ExtDimSize)
+lookupDim :: VName -> InternaliseTypeM (Maybe ExtSize)
 lookupDim name = M.lookup name <$> asks typeEnvDims
 
 lookupTypeVar' :: VName -> InternaliseTypeM (Maybe TypeEntry)

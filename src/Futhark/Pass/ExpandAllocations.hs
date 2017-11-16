@@ -46,20 +46,20 @@ transformBody (Body () bnds res) = do
 
 transformStm :: Stm ExplicitMemory -> ExpandM [Stm ExplicitMemory]
 
-transformStm (Let pat () e) = do
+transformStm (Let pat aux e) = do
   (bnds, e') <- transformExp =<< mapExpM transform e
-  return $ bnds ++ [Let pat () e']
+  return $ bnds ++ [Let pat aux e']
   where transform = identityMapper { mapOnBody = const transformBody
                                    }
 
 transformExp :: Exp ExplicitMemory -> ExpandM ([Stm ExplicitMemory], Exp ExplicitMemory)
 
-transformExp (Op (Inner (Kernel desc cs space ts kbody)))
+transformExp (Op (Inner (Kernel desc space ts kbody)))
   | Right (kbody', thread_allocs) <- extractKernelBodyAllocations bound_in_kernel kbody = do
 
       num_threads64 <- newVName "num_threads64"
-      let num_threads64_pat = Pattern [] [PatElem num_threads64 BindVar $ Scalar int64]
-          num_threads64_bnd = Let num_threads64_pat () $ BasicOp $
+      let num_threads64_pat = Pattern [] [PatElem num_threads64 BindVar $ MemPrim int64]
+          num_threads64_bnd = Let num_threads64_pat (defAux ()) $ BasicOp $
                               ConvOp (SExt Int32 Int64) (spaceNumThreads space)
 
       (alloc_bnds, alloc_offsets) <-
@@ -69,7 +69,7 @@ transformExp (Op (Inner (Kernel desc cs space ts kbody)))
       let kbody'' = offsetMemoryInKernelBody alloc_offsets kbody'
 
       return (num_threads64_bnd : alloc_bnds,
-              Op $ Inner $ Kernel desc cs space ts kbody'')
+              Op $ Inner $ Kernel desc space ts kbody'')
 
   where bound_in_kernel =
           S.fromList $ M.keys $ scopeOfKernelSpace space <>
@@ -97,13 +97,13 @@ extractThreadAllocations bound_before_body bnds = do
   return (catMaybes bnds', allocs)
   where bound_here = bound_before_body `S.union` boundByStms bnds
 
-        isAlloc _ (Let (Pattern [] [patElem]) () (Op (Alloc (Var v) _)))
+        isAlloc _ (Let (Pattern [] [patElem]) _ (Op (Alloc (Var v) _)))
           | v `S.member` bound_here =
             throwError $ "Size " ++ pretty v ++
             " for block " ++ pretty patElem ++
             " is not lambda-invariant"
 
-        isAlloc allocs (Let (Pattern [] [patElem]) () (Op (Alloc size space))) =
+        isAlloc allocs (Let (Pattern [] [patElem]) _ (Op (Alloc size space))) =
           return (M.insert (patElemName patElem) (size, space) allocs,
                   Nothing)
 
@@ -130,16 +130,18 @@ expandedAllocations (num_threads64, num_groups, group_size) (_thread_index, grou
   where expand (mem, (per_thread_size, Space "local")) = do
           let allocpat = Pattern [] [PatElem mem BindVar $
                                      MemMem per_thread_size $ Space "local"]
-          return ([Let allocpat () $ Op $ Alloc per_thread_size $ Space "local"],
+          return ([Let allocpat (defAux ()) $ Op $ Alloc per_thread_size $ Space "local"],
                   mempty)
 
         expand (mem, (per_thread_size, space)) = do
           total_size <- newVName "total_size"
-          let sizepat = Pattern [] [PatElem total_size BindVar $ Scalar int64]
+          let sizepat = Pattern [] [PatElem total_size BindVar $ MemPrim int64]
               allocpat = Pattern [] [PatElem mem BindVar $
                                      MemMem (Var total_size) space]
-          return ([Let sizepat () $ BasicOp $ BinOp (Mul Int64) num_threads64 per_thread_size,
-                   Let allocpat () $ Op $ Alloc (Var total_size) space],
+          return ([Let sizepat (defAux ()) $
+                    BasicOp $ BinOp (Mul Int64) num_threads64 per_thread_size,
+                   Let allocpat (defAux ()) $
+                    Op $ Alloc (Var total_size) space],
                    M.singleton mem newBase)
 
         newBase old_shape =
@@ -203,11 +205,19 @@ offsetMemoryInParam offsets fparam =
   fparam { paramAttr = offsetMemoryInMemBound offsets $ paramAttr fparam }
 
 offsetMemoryInMemBound :: RebaseMap -> MemBound u -> MemBound u
-offsetMemoryInMemBound offsets (ArrayMem bt shape u mem ixfun)
+offsetMemoryInMemBound offsets (MemArray bt shape u (ArrayIn mem ixfun))
   | Just new_base <- lookupNewBase mem (IxFun.base ixfun) offsets =
-      ArrayMem bt shape u mem $ IxFun.rebase new_base ixfun
+      MemArray bt shape u $ ArrayIn mem $ IxFun.rebase new_base ixfun
 offsetMemoryInMemBound _ summary =
   summary
+
+offsetMemoryInBodyReturns :: RebaseMap -> BodyReturns -> BodyReturns
+offsetMemoryInBodyReturns offsets (MemArray pt shape u (ReturnsInBlock mem ixfun))
+  | Just ixfun' <- isStaticIxFun ixfun,
+    Just new_base <- lookupNewBase mem (IxFun.base ixfun') offsets =
+      MemArray pt shape u $ ReturnsInBlock mem $
+      IxFun.rebase (fmap (fmap Free) new_base) ixfun
+offsetMemoryInBodyReturns _ br = br
 
 offsetMemoryInExp :: RebaseMap -> Exp InKernel -> Exp InKernel
 offsetMemoryInExp offsets (DoLoop ctx val form body) =
@@ -233,5 +243,7 @@ offsetMemoryInExp offsets (Op (Inner (GroupReduce w lam input))) =
 offsetMemoryInExp offsets (Op (Inner (Combine cspace ts active body))) =
   Op $ Inner $ Combine cspace ts active $ offsetMemoryInBody offsets body
 offsetMemoryInExp offsets e = mapExp recurse e
-  where recurse = identityMapper { mapOnBody = const $ return . offsetMemoryInBody offsets
-                                 }
+  where recurse = identityMapper
+                  { mapOnBody = const $ return . offsetMemoryInBody offsets
+                  , mapOnBranchType = return . offsetMemoryInBodyReturns offsets
+                  }

@@ -91,7 +91,7 @@ kernelCompiler dest (SufficientParallelism se) = do
   se' <- ImpGen.compileSubExp se
   ImpGen.emit $ Imp.SetScalar v $ Imp.CmpOpExp (CmpSlt Int32) (64*1024) se'
 
-kernelCompiler dest (Kernel desc _ space _ kernel_body) = do
+kernelCompiler dest (Kernel desc space _ kernel_body) = do
 
   num_groups' <- ImpGen.subExpToDimSize $ spaceNumGroups space
   group_size' <- ImpGen.subExpToDimSize $ spaceGroupSize space
@@ -162,8 +162,7 @@ kernelCompiler dest (Kernel desc _ space _ kernel_body) = do
 expCompiler :: ImpGen.ExpCompiler ExplicitMemory Imp.HostOp
 -- We generate a simple kernel for itoa and replicate.
 expCompiler
-  (ImpGen.Destination
-    [ImpGen.ArrayDestination (ImpGen.CopyIntoMemory destloc) _])
+  (ImpGen.Destination [ImpGen.ArrayDestination (Just destloc)])
   (BasicOp (Iota n x s et)) = do
   thread_gid <- newVName "thread_gid"
 
@@ -314,9 +313,11 @@ inKernelCopy :: ImpGen.CopyCompiler InKernel Imp.KernelOp
 inKernelCopy = ImpGen.copyElementWise
 
 inKernelExpCompiler :: ImpGen.ExpCompiler InKernel Imp.KernelOp
-inKernelExpCompiler _ (BasicOp (Assert _ loc)) =
+inKernelExpCompiler _ (BasicOp (Assert _ _ (loc, locs))) =
   compilerLimitationS $
-  unlines [ "Cannot compile assertion at " ++ locStr loc ++ " inside parallel kernel."
+  unlines [ "Cannot compile assertion at " ++
+            intercalate " -> " (reverse $ map locStr $ loc:locs) ++
+            " inside parallel kernel."
           , "As a workaround, surround the expression with 'unsafe'."]
 -- The static arrays stuff does not work inside kernels.
 inKernelExpCompiler (ImpGen.Destination [dest]) (BasicOp (ArrayLit es _)) =
@@ -651,7 +652,7 @@ compileKernelStms constants ungrouped_bnds m =
   where compileGroupedKernelStms' [] = m
         compileGroupedKernelStms' ((g, bnds):rest_bnds) =
           ImpGen.declaringScopes
-          (map ((Just . bindingExp) &&& (castScope . scopeOf)) bnds) $ do
+          (map ((Just . stmExp) &&& (castScope . scopeOf)) bnds) $ do
             protect g $ mapM_ compileKernelStm bnds
             compileGroupedKernelStms' rest_bnds
 
@@ -698,15 +699,13 @@ compileKernelExp constants dest (Combine cspace ts aspace body)
       ImpGen.emit $ Imp.Op Imp.Barrier
       ImpGen.emit $ Imp.If (Imp.BinOpExp LogAnd (isActive cspace) (isActive aspace)) copy mempty
       ImpGen.emit $ Imp.Op Imp.Barrier
-        where index t (ImpGen.ArrayDestination (ImpGen.CopyIntoMemory loc) shape) =
+        where index t (ImpGen.ArrayDestination (Just loc)) =
                 let space_dims = map (ImpGen.varIndex . fst) cspace
                     t_dims = map (primExpFromSubExp int32) $ arrayDims t
-                in Just $ ImpGen.ArrayDestination
-                   (ImpGen.CopyIntoMemory
-                     (ImpGen.sliceArray loc $
-                      fullSliceNum (space_dims++t_dims) $
-                      map (DimFix . ImpGen.varIndex . fst) cspace))
-                   shape
+                in Just $ ImpGen.ArrayDestination $
+                   Just $ ImpGen.sliceArray loc $
+                   fullSliceNum (space_dims++t_dims) $
+                   map (DimFix . ImpGen.varIndex . fst) cspace
               index _ _ = Nothing
 
 compileKernelExp constants (ImpGen.Destination dests) (GroupReduce w lam input) = do
@@ -1003,9 +1002,9 @@ compileKernelResult constants dest (ThreadsReturn ThreadsInSpace what) = do
     write_result mempty
 
 compileKernelResult constants dest (ConcatReturns SplitContiguous _ per_thread_elems moffset what) = do
-  ImpGen.ArrayDestination (ImpGen.CopyIntoMemory dest_loc) x <- return dest
+  ImpGen.ArrayDestination (Just dest_loc) <- return dest
   let dest_loc_offset = ImpGen.offsetArray dest_loc offset
-      dest' = ImpGen.ArrayDestination (ImpGen.CopyIntoMemory dest_loc_offset) x
+      dest' = ImpGen.ArrayDestination $ Just dest_loc_offset
   ImpGen.copyDWIMDest dest' [] (Var what) []
   where offset = case moffset of
                    Nothing -> primExpFromSubExp int32 per_thread_elems *
@@ -1013,29 +1012,28 @@ compileKernelResult constants dest (ConcatReturns SplitContiguous _ per_thread_e
                    Just se -> primExpFromSubExp int32 se
 
 compileKernelResult constants dest (ConcatReturns (SplitStrided stride) _ _ moffset what) = do
-  ImpGen.ArrayDestination (ImpGen.CopyIntoMemory dest_loc) x <- return dest
+  ImpGen.ArrayDestination (Just dest_loc) <- return dest
   let dest_loc' = ImpGen.strideArray
                   (ImpGen.offsetArray dest_loc offset) $
                   primExpFromSubExp int32 stride
-      dest' = ImpGen.ArrayDestination (ImpGen.CopyIntoMemory dest_loc') x
+      dest' = ImpGen.ArrayDestination $ Just dest_loc'
   ImpGen.copyDWIMDest dest' [] (Var what) []
   where offset = case moffset of
                    Nothing -> ImpGen.varIndex (kernelGlobalThreadId constants)
                    Just se -> primExpFromSubExp int32 se
 
-compileKernelResult constants dest (WriteReturn rw _arr i e) = do
-  i' <- ImpGen.compileSubExp i
-  rw' <- ImpGen.compileSubExp rw
-  let condInBounds0 = Imp.CmpOpExp (Imp.CmpSle Int32)
-                      (Imp.ValueExp (IntValue (Int32Value 0)))
-                      i'
+compileKernelResult constants dest (WriteReturn rws _arr is e) = do
+  is' <- mapM ImpGen.compileSubExp is
+  rws' <- mapM ImpGen.compileSubExp rws
+  let condInBounds0 = Imp.CmpOpExp (Imp.CmpSle Int32) $
+                      Imp.ValueExp (IntValue (Int32Value 0))
       condInBounds1 = Imp.CmpOpExp (Imp.CmpSlt Int32)
-                      i' rw'
-      condInBounds = Imp.BinOpExp LogAnd condInBounds0 condInBounds1
-      write = Imp.BinOpExp LogAnd (kernelThreadActive constants) condInBounds
+      condInBounds i rw = Imp.BinOpExp LogAnd (condInBounds0 i) (condInBounds1 i rw)
+      write = foldl (Imp.BinOpExp LogAnd) (kernelThreadActive constants) $
+              zipWith condInBounds is' rws'
 
   actual_body' <- ImpGen.collect $
-    ImpGen.copyDWIMDest dest [primExpFromSubExp int32 i] e []
+    ImpGen.copyDWIMDest dest (map (primExpFromSubExp int32) is) e []
   ImpGen.emit $ Imp.If write actual_body' Imp.Skip
 
 compileKernelResult _ _ KernelInPlaceReturn{} =

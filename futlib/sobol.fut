@@ -9,23 +9,24 @@ module type sobol_dir = {
 }
 
 module type sobol = {
-  val D : i32                              -- dimensionality of sequence
-  val norm : f64                           -- the value 2**32
-  val independent : i32 -> [D]u32          -- [independent i] returns the i'th
-                                           -- sobol vector (in u32)
-  val recurrent : i32 -> [D]u32 -> [D]u32  -- [recurrent i v] returns the i'th
-                                           -- sobol vector given v is the
-                                           -- (i-1)'th sobol vector
-  val chunk : i32 -> (n:i32) -> [n][D]f64  -- [chunk i n] returns the array
-                                           -- [v_i,...,v_(i+n-1)] of sobol
-                                           -- vectors where v_j is the j'th
-                                           -- D-dimensional sobol vector
+  -- | Dimensionality of sequence.
+  val D : i32
+  -- | The value 2**32.
+  val norm : f64
+  -- | [independent i] returns the i'th sobol vector (in u32)
+  val independent : i32 -> [D]u32
+  -- | [recurrent i v] returns the i'th sobol vector given v is the
+  -- (i-1)'th sobol vector
+  val recurrent : i32 -> [D]u32 -> [D]u32
+  -- | [chunk i n] returns the array [v_i,...,v_(i+n-1)] of sobol
+  -- vectors where v_j is the j'th D-dimensional sobol vector
+  val chunk : i32 -> (n:i32) -> [n][D]f64
   module Reduce :
       (X : { include monoid
              val f : [D]f64 -> t }) -> { val run : i32 -> X.t }
 }
 
-module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
+module Sobol (DM: sobol_dir) (X: { val D : i32 }) : sobol = {
   let D = X.D
 
   -- Compute direction vectors. In general, some work can be saved if
@@ -39,28 +40,27 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
   -- direction vector for dimension j
   let dirvec (j:i32) : [L]u32 = unsafe
     if j == 0 then
-       map (\i -> 1u32 << (u32(L)-u32(i+1))
-           ) (iota L)
+       map (\i -> 1u32 << (u32.i32 L-u32.i32 (i+1))) (iota L)
     else
-       let s = D.s[j-1]
-       let a = D.a[j-1]
+       let s = DM.s[j-1]
+       let a = DM.a[j-1]
        let V = map (\i -> if i >= s then 0u32
-                          else D.m[j-1,i] << (u32(L)-u32(i+1))
+                          else DM.m[j-1,i] << (u32.i32 L-u32.i32(i+1))
                    ) (iota L)
        in loop (V) for i' < L-s do
             let i = i'+s
             let v = V[i-s]
-            let vi0 = v ^ (v >> (u32(s)))
+            let vi0 = v ^ (v >> (u32.i32 s))
             let vi =
-              loop (vi = vi0) for k' < s-1 do
+              loop vi = vi0 for k' < s-1 do
                 let k = k'+1
-                in vi ^ (((a >> u32(s-1-k)) & 1u32) * V[i-k])
+                in vi ^ (((a >> u32.i32(s-1-k)) & 1u32) * V[i-k])
             in V with [i] <- vi
 
   let index_of_least_significant_0 (x:i32) : i32 =
-    loop (i = 0) while i < 32 && ((x>>i)&1) != 0 do i + 1
+    loop i = 0 while i < 32 && ((x>>i)&1) != 0 do i + 1
 
-  let norm = 2.0 f64.** f64(L)
+  let norm = 2.0 f64.** f64.i32 L
 
   let grayCode (x: i32): i32 = (x >> 1) ^ x
 
@@ -98,7 +98,7 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
                        else recM (k+offs-1))
                     (iota n)
     let vct_ints = scan (\x y -> map (^) x y) (replicate D 0u32) contrbs
-    in map (\xs -> map (\x -> f64(x)/norm) xs) vct_ints
+    in map (\xs -> map (\x -> f64.u32 x/norm) xs) vct_ints
 
   module Reduce (X : { include monoid
                        val f : [D]f64 -> t }) : { val run : i32 -> X.t } =
@@ -106,7 +106,7 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
     let run (N:i32) : X.t =
       stream_red X.op (\ [sz] (ns:[sz]i32) : X.t ->
                        if sz > 0 then
-                          reduce X.op X.ne (map X.f (chunk ns[0] sz))
+                          reduce X.op X.ne (map X.f (chunk (unsafe ns[0]) sz))
                        else X.ne)
       (iota N)
   }

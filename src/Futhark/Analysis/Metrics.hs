@@ -72,7 +72,7 @@ bodyMetrics :: OpMetrics (Op lore) => Body lore -> MetricsM ()
 bodyMetrics = mapM_ bindingMetrics . bodyStms
 
 bindingMetrics :: OpMetrics (Op lore) => Stm lore -> MetricsM ()
-bindingMetrics = expMetrics . bindingExp
+bindingMetrics = expMetrics . stmExp
 
 expMetrics :: OpMetrics (Op lore) => Exp lore -> MetricsM ()
 expMetrics (BasicOp op) =
@@ -85,7 +85,7 @@ expMetrics (If _ tb fb _) =
   inside "If" $ do
     inside "True" $ bodyMetrics tb
     inside "False" $ bodyMetrics fb
-expMetrics (Apply fname _ _) =
+expMetrics (Apply fname _ _ _) =
   seen $ "Apply" <> fromString (nameToString fname)
 expMetrics (Op op) =
   opMetrics op

@@ -186,7 +186,7 @@ module type sobol = {
              val f : [D]f64 -> t }) -> { val run : i32 -> X.t }
 }
 
-module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
+module Sobol (DM: sobol_dir) (X: { val D : i32 }) : sobol = {
   let D = X.D
 
   -- Compute direction vectors. In general, some work can be saved if
@@ -200,24 +200,24 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
   -- direction vector for dimension j
   let dirvec (j:i32) : [L]u32 = unsafe
     if j == 0 then
-       map (\i -> 1u32 << (32u32-u32(i+1))
+       map (\i -> 1u32 << (32u32-u32.i32(i+1))
  	   ) (iota L)
     else
-       let s = D.s[j-1]
-       let a = D.a[j-1]
+       let s = DM.s[j-1]
+       let a = DM.a[j-1]
        let V = map (\i -> if i >= s then 0u32
-			  else D.m[j-1,i] << (32u32-u32(i+1))
+			  else DM.m[j-1,i] << (32u32-u32.i32(i+1))
 		   ) (iota L) in
-       #2 (loop ((i,V) = (s, V)) while i < L do
-           let v = V[i-s]
-	   let vi0 = v ^ (v >> (u32(s)))
-	   let (_,vi) =
-	     loop ((k,vi) = (1,vi0)) while k <= s-1 do
-               (k+1, vi ^ (((a >> u32(s-1-k)) & 1u32) * V[i-k]))
-	   in (i+1, V with [i] <- vi))
+       (loop (i,V) = (s, V) while i < L do
+          let v = V[i-s]
+	  let vi0 = v ^ (v >> (u32.i32(s)))
+	  let (_,vi) =
+	    loop (k,vi) = (1,vi0) while k <= s-1 do
+              (k+1, vi ^ (((a >> u32.i32(s-1-k)) & 1u32) * V[i-k]))
+	  in (i+1, V with [i] <- vi)).2
 
   let index_of_least_significant_0(x: i32): i32 =
-    loop (i = 0) while i < 32 && ((x>>i)&1) != 0 do i + 1
+    loop i = 0 while i < 32 && ((x>>i)&1) != 0 do i + 1
 
   let norm = 2.0 f64.** 32.0
 
@@ -256,7 +256,7 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
                        else recM (k+offs-1))
                     (iota n)
     let vct_ints = scan (\x y -> map (^) x y) (replicate D 0u32) contrbs
-    in map (\xs -> map (\x -> f64(x)/norm) xs) vct_ints
+    in map (\xs -> map (\x -> f64.u32(x)/norm) xs) vct_ints
 
   module Reduce (X : { include monoid
                        val f : [D]f64 -> t }) : { val run : i32 -> X.t } =
@@ -264,7 +264,7 @@ module Sobol (D: sobol_dir) (X: { val D : i32 }) : sobol = {
     let run (N:i32) : X.t =
       stream_red_per X.op (\ [sz] (ns:[sz]i32) : X.t ->
                            if sz > 0
-                           then reduce X.op X.ne (map X.f (chunk ns[0] sz))
+                           then reduce X.op X.ne (map X.f (unsafe chunk ns[0] sz))
                            else X.ne)
       (iota N)
 
@@ -275,7 +275,7 @@ module S8 = Sobol x.sobol_dir { let D = 8 }
 module S2 = Sobol x.sobol_dir { let D = 2 }
 
 let mean [n] (xs: [n]f64) : f64 =
-  reduce (+) 0.0 xs / f64(n)
+  reduce (+) 0.0 xs / r64(n)
 
 module R = S2.Reduce { type t = f64
                        let ne = 0f64
@@ -283,9 +283,9 @@ module R = S2.Reduce { type t = f64
 		       let f (v : [2]f64) : f64 =
                          let x = v[0]
 		 	 let y = v[1]
-			 in f64(x*x+y*y < 1f64) }
+			 in f64.bool(x*x+y*y < 1f64) }
 
 let pi (n:i32) : f64 =
-  R.run n * 4.0 / f64(n)
+  R.run n * 4.0 / r64(n)
 
 let main (n: i32) : f64 = pi 10000

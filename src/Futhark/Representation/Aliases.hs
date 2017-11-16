@@ -110,6 +110,7 @@ instance (Annotations lore, CanBeAliased (Op lore)) =>
   type FParamAttr (Aliases lore) = FParamAttr lore
   type LParamAttr (Aliases lore) = LParamAttr lore
   type RetType (Aliases lore) = RetType lore
+  type BranchType (Aliases lore) = BranchType lore
   type Op (Aliases lore) = OpWithAliases (Op lore)
 
 instance AliasesOf (VarAliases, attr) where
@@ -117,14 +118,19 @@ instance AliasesOf (VarAliases, attr) where
 
 instance FreeAttr Names' where
 
+withoutAliases :: (HasScope (Aliases lore) m, Monad m) =>
+                 ReaderT (Scope lore) m a -> m a
+withoutAliases m = do
+  scope <- asksScope removeScopeAliases
+  runReaderT m scope
+
 instance (Attributes lore, CanBeAliased (Op lore)) => Attributes (Aliases lore) where
-  expContext pat e = do
-    env <- asksScope removeScopeAliases
-    return $ runReader (expContext (removePatternAliases pat) (removeExpAliases e)) env
+  expTypesFromPattern =
+    withoutAliases . expTypesFromPattern . removePatternAliases
 
 instance (Attributes lore, CanBeAliased (Op lore)) => Aliased (Aliases lore) where
-  bodyAliases = map unNames . fst . fst . bodyLore
-  consumedInBody = unNames . snd . fst . bodyLore
+  bodyAliases = map unNames . fst . fst . bodyAttr
+  consumedInBody = unNames . snd . fst . bodyAttr
 
 instance PrettyAnnot (PatElemT attr) =>
   PrettyAnnot (PatElemT (VarAliases, attr)) where
@@ -192,6 +198,7 @@ removeAliases = Rephraser { rephraseExpLore = return . snd
                           , rephraseFParamLore = return
                           , rephraseLParamLore = return
                           , rephraseRetType = return
+                          , rephraseBranchType = return
                           , rephraseOp = return . removeOpAliases
                           }
 
@@ -283,7 +290,9 @@ mkContextAliases pat (DoLoop ctxmerge valmerge _ body) =
      else map (const mempty) $ patternContextElements pat
   where mergenames = map (paramName . fst) $ ctxmerge ++ valmerge
         mergenames_set = S.fromList mergenames
--- FIXME: handle If here as well.
+mkContextAliases pat (If _ tbranch fbranch _) =
+  take (length $ patternContextNames pat) $
+  zipWith (<>) (bodyAliases tbranch) (bodyAliases fbranch)
 mkContextAliases pat _ =
   replicate (length $ patternContextElements pat) mempty
 
@@ -298,7 +307,7 @@ mkBodyAliases bnds res =
   -- bound in bnds.
   let (aliases, consumed) = mkStmsAliases bnds res
       boundNames =
-        mconcat $ map (S.fromList . patternNames . bindingPattern) bnds
+        mconcat $ map (S.fromList . patternNames . stmPattern) bnds
       bound = (`S.member` boundNames)
       aliases' = map (S.filter (not . bound)) aliases
       consumed' = S.filter (not . bound) consumed
@@ -328,7 +337,7 @@ trackAliases :: Aliased lore =>
                 AliasesAndConsumed -> Stm lore
              -> AliasesAndConsumed
 trackAliases (aliasmap, consumed) bnd =
-  let pat = bindingPattern bnd
+  let pat = stmPattern bnd
       als = M.fromList $
             zip (patternNames pat) (map addAliasesOfAliases $ patternAliases pat)
       aliasmap' = als <> aliasmap
@@ -340,11 +349,11 @@ trackAliases (aliasmap, consumed) bnd =
 
 mkAliasedLetStm :: (Attributes lore, CanBeAliased (Op lore)) =>
                    Pattern lore
-                -> ExpAttr lore -> Exp (Aliases lore)
+                -> StmAux (ExpAttr lore) -> Exp (Aliases lore)
                 -> Stm (Aliases lore)
-mkAliasedLetStm pat explore e =
+mkAliasedLetStm pat (StmAux cs attr) e =
   Let (addAliasesToPattern pat e)
-  (Names' $ consumedInPattern pat <> consumedInExp e, explore)
+  (StmAux cs (Names' $ consumedInPattern pat <> consumedInExp e, attr))
   e
 
 instance (Bindable lore, CanBeAliased (Op lore)) => Bindable (Aliases lore) where
@@ -358,8 +367,8 @@ instance (Bindable lore, CanBeAliased (Op lore)) => Bindable (Aliases lore) wher
   mkLetNames names e = do
     env <- asksScope removeScopeAliases
     flip runReaderT env $ do
-      Let pat explore _ <- mkLetNames names $ removeExpAliases e
-      return $ mkAliasedLetStm pat explore e
+      Let pat attr _ <- mkLetNames names $ removeExpAliases e
+      return $ mkAliasedLetStm pat attr e
 
   mkBody bnds res =
     let Body bodylore _ _ = mkBody (map removeStmAliases bnds) res

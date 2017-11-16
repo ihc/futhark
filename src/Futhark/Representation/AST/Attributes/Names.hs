@@ -49,7 +49,7 @@ freeWalker = identityWalker {
                walkOnSubExp = tell . freeIn
              , walkOnBody = tell . freeInBody
              , walkOnVName = tell . S.singleton
-             , walkOnCertificates = tell . S.fromList
+             , walkOnCertificates = tell . freeIn
              , walkOnOp = tell . freeIn
              }
 
@@ -90,7 +90,7 @@ freeInExp (DoLoop ctxmerge valmerge form loopbody) =
   let (ctxparams, ctxinits) = unzip ctxmerge
       (valparams, valinits) = unzip valmerge
       bound_here = S.fromList $ M.keys $
-                   scopeOfLoopForm form <>
+                   scopeOf form <>
                    scopeOfFParams (ctxparams ++ valparams)
   in (freeIn (ctxinits ++ valinits) <> freeIn form <>
       freeIn (ctxparams ++ valparams) <> freeInBody loopbody)
@@ -106,8 +106,8 @@ freeInStm :: (FreeAttr (ExpAttr lore),
               FreeIn (LetAttr lore),
               FreeIn (Op lore)) =>
              Stm lore -> Names
-freeInStm (Let pat attr e) =
-  precomputed attr $ freeIn attr <> freeInExp e <> freeIn pat
+freeInStm (Let pat (StmAux cs attr) e) =
+  freeIn cs <> precomputed attr (freeIn attr <> freeInExp e <> freeIn pat)
 
 -- | Return the set of variable names that are free in the given
 -- lambda, including shape annotations in the parameters.
@@ -181,13 +181,12 @@ instance FreeIn SubExp where
   freeIn (Var v) = freeIn v
   freeIn Constant{} = mempty
 
-instance FreeIn Shape where
+instance FreeIn d => FreeIn (ShapeBase d) where
   freeIn = mconcat . map freeIn . shapeDims
 
-instance FreeIn ExtShape where
-  freeIn = mconcat . map freeInExtDimSize . extShapeDims
-    where freeInExtDimSize (Free se) = freeIn se
-          freeInExtDimSize (Ext _)   = mempty
+instance FreeIn d => FreeIn (Ext d) where
+  freeIn (Free x) = freeIn x
+  freeIn (Ext _)  = mempty
 
 instance FreeIn shape => FreeIn (TypeBase shape u) where
   freeIn (Array _ shape _) = freeIn shape
@@ -204,11 +203,8 @@ instance FreeIn attr => FreeIn (PatElemT attr) where
 
 instance FreeIn Bindage where
   freeIn BindVar = mempty
-  freeIn (BindInPlace cs src is) =
-    freeIn cs <> freeIn src <> freeIn is
-
-instance FreeIn ExtRetType where
-  freeIn = mconcat . map freeIn . retTypeValues
+  freeIn (BindInPlace src is) =
+    freeIn src <> freeIn is
 
 instance FreeIn (LParamAttr lore) => FreeIn (LoopForm lore) where
   freeIn (ForLoop _ _ bound loop_vars) = freeIn bound <> freeIn loop_vars
@@ -224,6 +220,12 @@ instance FreeIn attr => FreeIn (PatternT attr) where
   freeIn (Pattern context values) =
     mconcat (map freeIn $ context ++ values) `S.difference` bound_here
     where bound_here = S.fromList $ map patElemName $ context ++ values
+
+instance FreeIn Certificates where
+  freeIn (Certificates cs) = freeIn cs
+
+instance FreeIn attr => FreeIn (StmAux attr) where
+  freeIn (StmAux cs attr) = freeIn cs <> freeIn attr
 
 -- | Either return precomputed free names stored in the attribute, or
 -- the freshly computed names.  Relies on lazy evaluation to avoid the
@@ -251,7 +253,7 @@ boundInBody = boundByStms . bodyStms
 
 -- | The names bound by a binding.
 boundByStm :: Stm lore -> Names
-boundByStm = S.fromList . patternNames . bindingPattern
+boundByStm = S.fromList . patternNames . stmPattern
 
 -- | The names bound by the bindings.
 boundByStms :: [Stm lore] -> Names

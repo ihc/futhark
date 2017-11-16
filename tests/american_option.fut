@@ -21,33 +21,33 @@ import "/futlib/array"
 let strike(): i32 = 100
 let bankDays(): i32 = 252
 let s0(): i32 = 100
-let r(): f64 = f64(0.03)
-let alpha(): f64 = f64(0.07)
-let sigma(): f64 = f64(0.20)
+let r(): f64 = 0.03
+let alpha(): f64 = 0.07
+let sigma(): f64 = 0.20
 
 let binom(expiry: i32): f64 =
   let n = expiry * bankDays()
-  let dt = f64(expiry) / f64(n)
+  let dt = r64(expiry) / r64(n)
   let u = f64.exp(alpha()*dt+sigma()*f64.sqrt(dt))
   let d = f64.exp(alpha()*dt-sigma()*f64.sqrt(dt))
   let stepR = f64.exp(r()*dt)
   let q = (stepR-d)/(u-d)
   let qUR = q/stepR
-  let qDR = (f64(1.0)-q)/stepR
+  let qDR = (1.0-q)/stepR
 
-  let uPow = map (u**) (map f64 (iota(n+1)))
-  let dPow = map (d**) (map f64 (map (n-) (iota(n+1))))
-  let st = map (f64(s0())*) (map (*) uPow dPow)
-  let finalPut = map (f64.max(f64(0.0))) (map (f64(strike())-) st) in
-  let put = loop (put = finalPut) for i in reverse (map (1+) (iota n)) do
+  let uPow = map (u**) (map r64 (iota(n+1)))
+  let dPow = map (d**) (map r64 (map (n-) (iota(n+1))))
+  let st = map (r64(s0())*) (map (*) uPow dPow)
+  let finalPut = map (f64.max(0.0)) (map (r64(strike())-) st) in
+  let put = loop put = finalPut for i in reverse (map (1+) (iota n)) do
     let (uPow_start, _) = split (i) uPow
     let (_, dPow_end) = split (n+1-i) dPow
-    let st = map (f64(s0())*) (map (*) uPow_start dPow_end)
+    let st = map (r64(s0())*) (map (*) uPow_start dPow_end)
     let (_, put_tail) = split (1) put
-    let (put_init, _) = split ((shape put)[0]-1) put in
+    let (put_init, _) = split (length put-1) put in
     map (\(x,y) -> f64.max x y)
     (zip
-     (map (f64(strike())-) st)
+     (map (r64(strike())-) st)
      (map (+)
       (map (qUR*) (put_tail))
       (map (qDR*) (put_init))))

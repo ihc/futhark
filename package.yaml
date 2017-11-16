@@ -1,5 +1,5 @@
 name: futhark
-version: "0.1"
+version: "0.2.0"
 synopsis: An optimising compiler for a functional, array-oriented language.
 description: See the website at https://futhark-lang.org
 homepage: https://futhark-lang.org
@@ -27,8 +27,8 @@ dependencies:
   - mtl >= 2.2.1
   - transformers >= 0.3
   - srcloc >= 0.4
-  - language-c-quote >= 0.11
-  - mainland-pretty >= 0.4
+  - language-c-quote >= 0.12
+  - mainland-pretty >= 0.6
   - hashable >= 1.2.1.0
   - parsec >= 3
   - regex-tdfa >= 1.2
@@ -44,6 +44,10 @@ dependencies:
   - gitrev >= 1.2.0
   - parallel >= 3.2.1.0
   - bifunctors
+  - blaze-html
+  - template-haskell
+  - th-lift-instances
+  - extra
 
 library:
   build-tools:
@@ -70,6 +74,9 @@ executables:
     ghc-options: -threaded -rtsopts "-with-rtsopts=-N -qg"
   futharki:
     <<: *futhark
+    dependencies:
+      - futhark
+      - haskeline
     main: src/futharki.hs
   futhark-c:
     <<: *futhark
@@ -95,6 +102,9 @@ executables:
   futhark-dataset:
     <<: *futhark
     main: src/futhark-dataset.hs
+  futhark-doc:
+    <<: *futhark
+    main: src/futhark-doc.hs
 
 tests:
   unit:

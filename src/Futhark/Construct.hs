@@ -13,6 +13,7 @@ module Futhark.Construct
 
   , eSubExp
   , eIf
+  , eIf'
   , eBinOp
   , eCmpOp
   , eNegate
@@ -40,6 +41,8 @@ module Futhark.Construct
   , cmpOpLambda
   , fullSlice
   , fullSliceNum
+  , isFullSlice
+  , ifCommon
 
   , module Futhark.Binder
 
@@ -61,7 +64,8 @@ where
 import qualified Data.Array as A
 import qualified Data.Map.Strict as M
 import Data.Loc (SrcLoc)
-
+import Data.List
+import Data.Ord
 import Control.Applicative
 import Control.Monad.Identity
 import Control.Monad.State
@@ -92,11 +96,11 @@ letExp desc e = do
     _       -> fail $ "letExp: tuple-typed expression given:\n" ++ pretty e
 
 letInPlace :: MonadBinder m =>
-              String -> Certificates -> VName -> Slice SubExp -> Exp (Lore m)
+              String -> VName -> Slice SubExp -> Exp (Lore m)
            -> m VName
-letInPlace desc cs src slice e = do
+letInPlace desc src slice e = do
   v <- newVName desc
-  idents <- letBindNames [(v,BindInPlace cs src slice)] e
+  idents <- letBindNames [(v,BindInPlace src slice)] e
   case idents of
     [ident] -> return $ identName ident
     _       -> fail $ "letExp: tuple-typed expression given:\n" ++ pretty e
@@ -130,15 +134,31 @@ eSubExp :: MonadBinder m =>
            SubExp -> m (Exp (Lore m))
 eSubExp = pure . BasicOp . SubExp
 
-eIf :: MonadBinder m =>
+eIf :: (MonadBinder m, BranchType (Lore m) ~ ExtType) =>
        m (Exp (Lore m)) -> m (Body (Lore m)) -> m (Body (Lore m))
     -> m (Exp (Lore m))
-eIf ce te fe = do
+eIf ce te fe = eIf' ce te fe IfNormal
+
+-- | As 'eIf', but an 'IfSort' can be given.
+eIf' :: (MonadBinder m, BranchType (Lore m) ~ ExtType) =>
+        m (Exp (Lore m)) -> m (Body (Lore m)) -> m (Body (Lore m))
+     -> IfSort
+     -> m (Exp (Lore m))
+eIf' ce te fe if_sort = do
   ce' <- letSubExp "cond" =<< ce
   te' <- insertStmsM te
   fe' <- insertStmsM fe
+  -- We need to construct the context.
   ts <- generaliseExtTypes <$> bodyExtType te' <*> bodyExtType fe'
-  return $ If ce' te' fe' ts
+  te'' <- addContextForBranch ts te'
+  fe'' <- addContextForBranch ts fe'
+  return $ If ce' te'' fe'' $ IfAttr ts if_sort
+  where addContextForBranch ts (Body _ stms val_res) = do
+          body_ts <- extendedScope (traverse subExpType val_res) stmsscope
+          let ctx_res = map snd $ sortBy (comparing fst) $
+                        M.toList $ shapeExtMapping ts body_ts
+          mkBodyM stms $ ctx_res++val_res
+            where stmsscope = scopeOf stms
 
 eBinOp :: MonadBinder m =>
           BinOp -> m (Exp (Lore m)) -> m (Exp (Lore m))
@@ -210,9 +230,9 @@ eCopy e = do e' <- letExp "copy_arg" =<< e
              return $ BasicOp $ Copy e'
 
 eAssert :: MonadBinder m =>
-         m (Exp (Lore m)) -> SrcLoc -> m (Exp (Lore m))
-eAssert e loc = do e' <- letSubExp "assert_arg" =<< e
-                   return $ BasicOp $ Assert e' loc
+         m (Exp (Lore m)) -> String -> SrcLoc -> m (Exp (Lore m))
+eAssert e msg loc = do e' <- letSubExp "assert_arg" =<< e
+                       return $ BasicOp $ Assert e' msg (loc, mempty)
 
 eValue :: MonadBinder m => Value -> m (Exp (Lore m))
 eValue (PrimVal bv) =
@@ -334,6 +354,18 @@ fullSliceNum :: Num d => [d] -> [DimIndex d] -> Slice d
 fullSliceNum dims slice =
   slice ++ map (\d -> DimSlice 0 d 1) (drop (length slice) dims)
 
+-- | Does the slice describe the full size of the array?  The most
+-- obvious such slice is one that 'DimSlice's the full span of every
+-- dimension, but also one that fixes all unit dimensions.
+isFullSlice :: Shape -> Slice SubExp -> Bool
+isFullSlice shape slice = and $ zipWith allOfIt (shapeDims shape) slice
+  where allOfIt (Constant v) DimFix{} = oneIsh v
+        allOfIt d (DimSlice _ n _) = d == n
+        allOfIt _ _ = False
+
+ifCommon :: [Type] -> IfAttr ExtType
+ifCommon ts = IfAttr (staticShapes ts) IfNormal
+
 -- | Conveniently construct a body that contains no bindings.
 resultBody :: Bindable lore => [SubExp] -> Body lore
 resultBody = mkBody []
@@ -380,7 +412,7 @@ instantiateShapes :: Monad m =>
                   -> m [TypeBase Shape u]
 instantiateShapes f ts = evalStateT (mapM instantiate ts) M.empty
   where instantiate t = do
-          shape <- mapM instantiate' $ extShapeDims $ arrayShape t
+          shape <- mapM instantiate' $ shapeDims $ arrayShape t
           return $ t `setArrayShape` Shape shape
         instantiate' (Ext x) = do
           m <- get
@@ -439,7 +471,7 @@ removeExistentials :: ExtType -> Type -> Type
 removeExistentials t1 t2 =
   t1 `setArrayDims`
   zipWith nonExistential
-  (extShapeDims $ arrayShape t1)
+  (shapeDims $ arrayShape t1)
   (arrayDims t2)
   where nonExistential (Ext _)    dim = dim
         nonExistential (Free dim) _   = dim
@@ -457,11 +489,11 @@ simpleMkLetNames names e = do
                    ]
       mkValElem (name, BindVar) t =
         return $ PatElem name BindVar t
-      mkValElem (name, bindage@(BindInPlace _ src _)) _ = do
+      mkValElem (name, bindage@(BindInPlace src _)) _ = do
         srct <- lookupType src
         return $ PatElem name bindage srct
   valElems <- zipWithM mkValElem names ts
-  return $ Let (Pattern shapeElems valElems) () e
+  return $ Let (Pattern shapeElems valElems) (StmAux mempty ()) e
 
 -- | Instances of this class can be converted to Futhark expressions
 -- within a 'MonadBinder'.

@@ -32,6 +32,7 @@
     <style id="builtin-functionlikes" _name="Functionlikes"  map-to="def:identifier" />
     <style id="variable"       _name="Variable"/> <!-- map to nothing -->
     <style id="identifier"     _name="Identifier"/> <!-- map to nothing -->
+    <style id="string"         _name="String"                map-to="def:string" />
 <!--    <style id="common-function" _name="Common Function" map-to="def:keyword"/>-->
     <style id="operator"       _name="Operator"              map-to="def:operator"/>
     <style id="boolean"        _name="Boolean"               map-to="def:boolean"/>
@@ -69,48 +70,49 @@
       <keyword>while</keyword>
       <keyword>do</keyword>
       <keyword>in</keyword>
-      <keyword>op</keyword>
-      <keyword>not</keyword>
-      <keyword>pow</keyword>
-      <keyword>shape</keyword>
-      <keyword>reshape</keyword>
-      <keyword>transpose</keyword>
-      <keyword>split</keyword>
-      <keyword>redomap</keyword>
+      
+      <keyword>local</keyword>
+      <keyword>type</keyword>
+      <keyword>val</keyword>
+      <keyword>module</keyword>
+      
+      <keyword>open</keyword>
+      <keyword>import</keyword>
+      
       <keyword>empty</keyword>
-      <keyword>copy</keyword>
-      <keyword>size</keyword>
-      <keyword>unsafe</keyword>
-      <keyword>default</keyword>
-      <keyword>include</keyword>
-    </context>
-
-    <context id="builtin-functionlikes" style-ref="builtin-functionlikes">
-      <keyword>map</keyword>
-      <keyword>streamMap</keyword>
-      <keyword>streamMapPer</keyword>
-      <keyword>zipWith</keyword>
-      <keyword>filter</keyword>
-      <keyword>partition</keyword>
-      <keyword>reduce</keyword>
-      <keyword>reduceComm</keyword>
-      <keyword>streamRed</keyword>
-      <keyword>streamRedPer</keyword>
-      <keyword>scan</keyword>
-      <keyword>streamSeq</keyword>
       
-      <keyword>iota</keyword>
-      
-      <keyword>replicate</keyword>
+      <!-- Perhaps arbitrary, but these are keywords, because they do not
+      take the 'fun' syntax as their primary input. -->
+      <keyword>reshape</keyword>
+      <keyword>rearrange</keyword>
+      <keyword>rotate</keyword>
+      <keyword>split</keyword>
       <keyword>concat</keyword>
       <keyword>zip</keyword>
       <keyword>unzip</keyword>
+      <keyword>unsafe</keyword>
+    </context>
 
-      <keyword>write</keyword>
+    <context id="builtin-functionlikes" style-ref="builtin-functionlikes">
+      <!-- These 'behave' like builtin-functions, because they take the 'fun'
+      syntax as their primary input. -->
+      <keyword>map</keyword>
+      <keyword>reduce</keyword>
+      <keyword>reduce_comm</keyword>
+      <keyword>scan</keyword>
+      <keyword>filter</keyword>
+      <keyword>partition</keyword>
+      <keyword>stream_map</keyword>
+      <keyword>stream_map_per</keyword>
+      <keyword>stream_red</keyword>
+      <keyword>stream_red_per</keyword>
+      <keyword>stream_seq</keyword>
+      
+      <keyword>iota</keyword>
     </context>
 
     <context id="operators" style-ref="operator" extend-parent="false">
-      <match>[+\-\*/&gt;&lt;%=&amp;\|]</match>
+      <match>[+\-\*/&gt;&lt;%\!=&amp;\|\^:]</match>
     </context>
 
     <context id="type" style-ref="type">
@@ -163,6 +165,11 @@
         (?![\w\.])
       </match>
     </context>
+
+    <context id="double-quoted-string" style-ref="string">
+      <start>"</start>
+      <end>"</end>
+    </context>
     
     <context id="futhark" class="no-spell-check">
       <include>
@@ -175,6 +182,7 @@
         <context ref="float" />
         <context ref="hexadecimal-number" />
         <context ref="integer" />
+        <context ref="double-quoted-string" />
         <context ref="variable" />
       </include>
     </context>
