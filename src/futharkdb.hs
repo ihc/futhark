@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE QuasiQuotes #-}
 
@@ -24,6 +25,7 @@ import System.Console.GetOpt
 
 import Language.Futhark as AST
 import Language.Futhark.Core(locStr)
+import Language.Futhark.Futlib.Prelude(preludeBasis)
 import Futhark.Compiler
 import Futhark.Debugger
 import Futhark.Pipeline(CompilerError(ExternalError))
@@ -96,7 +98,8 @@ main = reportingIOErrors $
   where run :: [String] -> DebuggerConfig -> Maybe (IO ())
         run [prog] config = Just $ do
             putStrLn $ "Reading file: " <> prog
-            res <- liftIO $ runExceptT (readProgram prog)
+            res <- liftIO $ runExceptT
+                     (readProgram False preludeBasis mempty prog)
                    `catch` \(err::IOException) ->
                    return (Left (ExternalError (T.pack $ show err)))
             case res of
@@ -180,7 +183,8 @@ commands = [ ("help",  (helpCommand,
         loadCommand :: Command
         loadCommand file = do
           liftIO $ T.putStrLn $ "Reading file " <> file
-          res <- liftIO $ runExceptT (readProgram $ T.unpack file)
+          res <- liftIO $ runExceptT
+                   (readProgram False preludeBasis mempty $ T.unpack file)
                  `catch` \(err::IOException) ->
                  return (Left (ExternalError (T.pack $ show err)))
           case res of

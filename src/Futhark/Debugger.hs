@@ -150,7 +150,7 @@ getPatternName x =
     TuplePattern _ _ -> VName (nameFromString "tuplePattern") 1
     RecordPattern _ _ -> VName (nameFromString "recordPattern") 1
     PatternParens p _ -> getPatternName p
-    Id idbase -> identName idbase
+    Id vn _ _ -> vn
     Wildcard _ _ -> VName (nameFromString "wildcardPattern") 1
     PatternAscription p _ -> getPatternName p
 
@@ -181,6 +181,9 @@ evalExp body ev =
 
     Parens e _ -> evalExp e env
 
+    QualParens _ _ _ ->
+      unimp "qual parens"
+
     TupLit _e _ ->
       unimp "tuple lit"
 
@@ -189,6 +192,9 @@ evalExp body ev =
 
     ArrayLit _es _type _ ->
       unimp "array lit"
+
+    Range _ _ _ _ ->
+      unimp "range"
 
     Empty _typedecl _ ->
       unimp "empty"
