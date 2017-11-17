@@ -3,15 +3,15 @@
 
 module Futhark.Debugger
   ( DebuggerError
-  , DebuggerT, debuggerT
+  , DebuggerT, debuggerT, stepDebuggerT
   , DebuggerExport(..)
   , DebuggerEnv, dbVtable, dbDepth, dbLocation
   , runFun
-  , stepDebuggerT
   , VTable
   )
 where
 
+import Control.Monad.Coroutine
 import Control.Monad.Except
 import Data.Loc(SrcLoc, noLoc, srclocOf)
 
@@ -22,30 +22,13 @@ import Language.Futhark
 {- TYPES                                                                      -}
 {------------------------------------------------------------------------------}
 
--- base debugging monad. NOTE: this is basically the coroutine monad
-newtype BaseDebuggerT s m a = DebuggerT
-  { stepDebuggerT :: m (Either a (s (BaseDebuggerT s m a))) }
+type BaseDebuggerT = Coroutine
 
-instance (Functor s, Monad m) => Monad (BaseDebuggerT s m) where
-  return x = DebuggerT $ return $ Left x
+stepDebuggerT :: BaseDebuggerT s m a -> m (Either (s (BaseDebuggerT s m a)) a )
+stepDebuggerT = resume
 
-  m >>= f = DebuggerT $ do
-    x <- stepDebuggerT m
-    case x of
-      Left x' ->
-        stepDebuggerT $ f x'
-      Right s ->
-        return $ Right (fmap (>>= f) s)
-
-instance (Functor s, Monad m) => Functor (BaseDebuggerT s m) where
-  fmap = liftM
-
-instance (Functor s, Monad m) => Applicative (BaseDebuggerT s m) where
-  pure = return
-  df <*> dx = df >>= \f -> liftM f dx
-
-debuggerT :: m (Either a (s (BaseDebuggerT s m a))) -> BaseDebuggerT s m a
-debuggerT = DebuggerT
+debuggerT :: m (Either (s (BaseDebuggerT s m a)) a) -> BaseDebuggerT s m a
+debuggerT = Coroutine
 
 -- language-specific debugging monad with error handling
 type DebuggerT m = BaseDebuggerT (DebuggerExport m) (ExceptT DebuggerError m)
@@ -78,8 +61,7 @@ instance Monad m => Functor (DebuggerExport m) where
 step :: Monad m
         => DebuggerEnv m -> String -> DebuggerT m a
         -> DebuggerT m a
-step env desc m =
-  debuggerT $ return $ Right (DebuggerExport desc env m)
+step env desc m = suspend (DebuggerExport desc env m)
 
 {------------------------------------------------------------------------------}
 {- ENVIRONMENT                                                                -}

@@ -319,12 +319,12 @@ handleStep cont =
   handleProgState (\step -> do
     k <- lift $ runExceptT $ stepDebuggerT $ stepState step
     case k of
-      (Right (Right (DebuggerExport desc env m'))) ->
+      (Right (Left (DebuggerExport desc env m'))) ->
         let nextStep = debuggerStep desc env m' in
         do
           pushHistory nextStep
           handleHitBreakpoints nextStep cont
-      (Right (Left res)) -> do
+      (Right (Right res)) -> do
         resetHistory
         liftIO $ putStrLn ("Result: " ++ pretty res)
       (Left err) -> do
